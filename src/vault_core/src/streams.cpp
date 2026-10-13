@@ -71,6 +71,32 @@ int det_read(void* ctx, uint8_t* buf, size_t cap, size_t* out_n) {
     return 0;
 }
 
+// Memory source over caller-owned parts. Reads never cross a part boundary.
+struct MemSource {
+    std::vector<const uint8_t*> parts;
+    std::vector<size_t> lens;
+    size_t part;
+    size_t pos;
+};
+
+int mem_read(void* ctx, uint8_t* buf, size_t cap, size_t* out_n) {
+    MemSource* s = static_cast<MemSource*>(ctx);
+    while (s->part < s->parts.size() && s->pos == s->lens[s->part]) {
+        s->part += 1;
+        s->pos = 0;
+    }
+    if (s->part >= s->parts.size() || cap == 0) {
+        *out_n = 0;
+        return 0;
+    }
+    size_t left = s->lens[s->part] - s->pos;
+    size_t n = left < cap ? left : cap;
+    std::memcpy(buf, s->parts[s->part] + s->pos, n);
+    s->pos += n;
+    *out_n = n;
+    return 0;
+}
+
 // Hashing sink.
 struct HashSink {
     crypto_generichash_state st;
@@ -391,6 +417,42 @@ int pv_hash_deterministic(const uint8_t* seed, size_t seed_len, uint64_t length,
         return rc;
     }
     return pv_sink_blake2b_finish(&sink, hash_out, hash_len);
+}
+
+int pv_source_memory_new(const uint8_t* const* parts, const size_t* part_lens,
+                         size_t part_count, pv_source* out) {
+    if (!out || (part_count > 0 && (!parts || !part_lens))) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    for (size_t i = 0; i < part_count; ++i) {
+        if (!parts[i] && part_lens[i] > 0) {
+            return PV_ERR_INVALID_ARGUMENT;
+        }
+    }
+    pv::MemSource* s = new (std::nothrow) pv::MemSource{};
+    if (!s) {
+        return PV_ERR_OUT_OF_MEMORY;
+    }
+    try {
+        s->parts.assign(parts, parts + part_count);
+        s->lens.assign(part_lens, part_lens + part_count);
+    } catch (...) {
+        delete s;
+        return PV_ERR_OUT_OF_MEMORY;
+    }
+    s->part = 0;
+    s->pos = 0;
+    out->ctx = s;
+    out->read = pv::mem_read;
+    return PV_OK;
+}
+
+void pv_source_memory_free(pv_source* s) {
+    if (s && s->ctx) {
+        delete static_cast<pv::MemSource*>(s->ctx);
+        s->ctx = nullptr;
+        s->read = nullptr;
+    }
 }
 
 int pv_object_id_to_hex(const uint8_t* object_id, char* hex_out, size_t cap) {

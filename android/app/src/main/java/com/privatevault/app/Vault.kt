@@ -1,6 +1,7 @@
 package com.privatevault.app
 
 import java.io.File
+import java.nio.ByteBuffer
 
 // One vault under the app's private files directory. Opening it means
 // unwrapping the vault master key through the Keystore envelope and handing
@@ -79,6 +80,9 @@ class Vault private constructor(val dir: File, private var handle: Long) {
 
     val isOpen: Boolean get() = handle != 0L
 
+    // Raw handle for the debug-only native helpers.
+    internal val rawHandle: Long get() = handle
+
     fun close() {
         if (handle != 0L) {
             NativeBridge.nativeVaultClose(handle)
@@ -108,6 +112,94 @@ class Vault private constructor(val dir: File, private var handle: Long) {
     fun listObjectIds(): List<ByteArray> {
         val objects = File(dir, "objects").listFiles() ?: return emptyList()
         return objects.filter { it.name.endsWith(".pvo") && it.name.length == 36 }
+            .sortedBy { it.lastModified() }
             .map { NativeBridge.fromHex(it.name.removeSuffix(".pvo")) }
+    }
+
+    // Phase 2: media items.
+
+    // Non-media fields of the item header, as captured.
+    data class ItemMeta(
+        val mediaType: Int, val rotation: Int, val width: Int, val height: Int, val createdMs: Long
+    ) {
+        fun fields(): LongArray =
+            longArrayOf(mediaType.toLong(), rotation.toLong(), width.toLong(), height.toLong(), createdMs)
+    }
+
+    // Which path the bytes took into the core.
+    enum class BufferPath { DIRECT, HEAP_ARRAY, HEAP_COPY }
+
+    class Stored(val id: ByteArray, val plaintextLen: Long, val path: BufferPath)
+
+    // Encrypts the bytes between position and limit of buffer as an item.
+    // Direct buffers are read in place. A heap buffer with an accessible array
+    // is handed over as that array (made by CameraX, not by this app); any
+    // other buffer is copied once into a ByteArray, which the caller must
+    // treat as a Kotlin copy of capture bytes. The buffer position is unchanged.
+    fun encryptItem(buffer: ByteBuffer, meta: ItemMeta): Stored {
+        val id = ByteArray(NativeBridge.OBJECT_ID_BYTES)
+        val len = LongArray(1)
+        val length = buffer.remaining()
+        val rc: Int
+        val path: BufferPath
+        if (buffer.isDirect) {
+            path = BufferPath.DIRECT
+            rc = NativeBridge.nativeEncryptItem(handle, buffer, buffer.position(), length, meta.fields(), id, len)
+        } else if (buffer.hasArray()) {
+            path = BufferPath.HEAP_ARRAY
+            rc = NativeBridge.nativeEncryptItemArray(
+                handle, buffer.array(), buffer.arrayOffset() + buffer.position(), length, meta.fields(), id, len
+            )
+        } else {
+            path = BufferPath.HEAP_COPY
+            val copy = ByteArray(length)
+            buffer.duplicate().get(copy)
+            try {
+                rc = NativeBridge.nativeEncryptItemArray(handle, copy, 0, length, meta.fields(), id, len)
+            } finally {
+                copy.fill(0)
+            }
+        }
+        check(rc, "encrypt item")
+        return Stored(id, len[0], path)
+    }
+
+    fun encryptItemArray(data: ByteArray, offset: Int, length: Int, meta: ItemMeta): Stored {
+        val id = ByteArray(NativeBridge.OBJECT_ID_BYTES)
+        val len = LongArray(1)
+        check(NativeBridge.nativeEncryptItemArray(handle, data, offset, length, meta.fields(), id, len), "encrypt item")
+        return Stored(id, len[0], BufferPath.HEAP_ARRAY)
+    }
+
+    data class ItemInfo(
+        val mediaType: Int, val rotation: Int, val width: Int, val height: Int,
+        val createdMs: Long, val payloadLen: Long, val headerLen: Int
+    ) {
+        fun typeName(): String = when (mediaType) {
+            NativeBridge.MEDIA_JPEG -> "jpeg"
+            NativeBridge.MEDIA_VIDEO_SEGMENT -> "video_segment"
+            NativeBridge.MEDIA_VIDEO_INDEX -> "video_index"
+            else -> "type_$mediaType"
+        }
+    }
+
+    // Result of an item verify: the object decrypted and authenticated (rc OK);
+    // item is set when the plaintext carried a valid header, in which case
+    // payloadHash is the BLAKE2b of the payload. itemStatus tells unknown
+    // items (ERR_NOT_ITEM) from malformed headers.
+    class ItemVerified(
+        val plaintextLen: Long, val itemStatus: Int, val item: ItemInfo?, val payloadHash: ByteArray?
+    )
+
+    fun decryptVerifyItem(id: ByteArray): Pair<Int, ItemVerified?> {
+        val hash = ByteArray(NativeBridge.HASH_BYTES)
+        val info = LongArray(8)
+        val status = IntArray(1)
+        val rc = NativeBridge.nativeDecryptVerifyItem(handle, id, hash, info, status)
+        if (rc != NativeBridge.OK) return rc to null
+        val item = if (status[0] == NativeBridge.OK) ItemInfo(
+            info[0].toInt(), info[1].toInt(), info[2].toInt(), info[3].toInt(), info[4], info[5], info[6].toInt()
+        ) else null
+        return rc to ItemVerified(info[7], status[0], item, if (item != null) hash else null)
     }
 }

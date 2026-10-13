@@ -34,6 +34,13 @@ extern "C" {
 #define PV_ERR_OUT_OF_MEMORY 18
 #define PV_ERR_INTERNAL 19
 #define PV_ERR_NOT_FOUND 20
+// Media item header codes (Phase 2). See docs/PHASE2_DESIGN.md Section 3.
+#define PV_ERR_ITEM_MALFORMED 21
+#define PV_ERR_ITEM_UNSUPPORTED 22
+// The plaintext does not start with the item magic. A classification result,
+// not a corruption: callers that accept non-item objects treat it as an
+// "unknown item". The object itself decrypted and authenticated normally.
+#define PV_ERR_NOT_ITEM 23
 
 // Sizes fixed by the format. Key sizes equal the libsodium constants; the
 // core checks that at compile time.
@@ -154,6 +161,71 @@ int pv_hash_deterministic(const uint8_t* seed, size_t seed_len, uint64_t length,
 // Hex helpers for object IDs. hex_out needs 2 * PV_OBJECT_ID_BYTES + 1 bytes.
 int pv_object_id_to_hex(const uint8_t* object_id, char* hex_out, size_t cap);
 int pv_object_id_from_hex(const char* hex, uint8_t* object_id_out);
+
+// Media item header. A convention inside the plaintext of an object: the
+// plaintext starts with this header, the media bytes follow. The object
+// format itself is unchanged. Layout (little-endian, 48 bytes written):
+//   0  8  magic "PVITEM01"
+//   8  2  item_version (1)
+//  10  2  header_len (48 written; 48 to 4096 accepted, extra bytes skipped)
+//  12  2  media_type
+//  14  2  rotation_degrees (0, 90, 180, 270)
+//  16  4  width
+//  20  4  height
+//  24  8  created_unix_ms
+//  32  8  payload_len (bytes after the header)
+//  40  8  reserved (zero)
+#define PV_ITEM_MAGIC "PVITEM01"
+#define PV_ITEM_HEADER_BYTES 48
+#define PV_ITEM_HEADER_MAX_BYTES 4096
+#define PV_ITEM_VERSION 1
+#define PV_MEDIA_JPEG 1
+#define PV_MEDIA_VIDEO_SEGMENT 2
+#define PV_MEDIA_VIDEO_INDEX 3
+
+typedef struct pv_item_header {
+    uint16_t item_version;
+    uint16_t header_len;
+    uint16_t media_type;
+    uint16_t rotation_degrees;
+    uint32_t width;
+    uint32_t height;
+    uint64_t created_unix_ms;
+    uint64_t payload_len;
+} pv_item_header;
+
+// encode writes PV_ITEM_HEADER_BYTES bytes and rejects fields a reader would
+// reject. decode needs at least PV_ITEM_HEADER_BYTES bytes and checks magic,
+// version, header_len, media_type, and rotation in that order. check_len
+// checks header_len + payload_len == plaintext_len. Codes: PV_ERR_NOT_ITEM,
+// PV_ERR_ITEM_UNSUPPORTED, PV_ERR_ITEM_MALFORMED.
+int pv_item_header_encode(const pv_item_header* h, uint8_t* out, size_t out_cap,
+                          size_t* out_len);
+int pv_item_header_decode(const uint8_t* buf, size_t len, pv_item_header* out);
+int pv_item_header_check_len(const pv_item_header* h, uint64_t plaintext_len);
+
+// Source over caller-owned memory parts, read in order as one stream. Nothing
+// is copied; the caller keeps every part alive until the source is freed. A
+// part may be empty; its pointer may be NULL only then. Reads stop at a part
+// boundary, so a consumer sees short reads.
+int pv_source_memory_new(const uint8_t* const* parts, const size_t* part_lens,
+                         size_t part_count, pv_source* out);
+void pv_source_memory_free(pv_source* s);
+
+// Sink that splits an item plaintext: keeps the header bytes, forwards the
+// payload to payload_sink. Use it as the destination of a decrypt, then call
+// finish only after the decrypt returned PV_OK; call abort otherwise. Before
+// completion the sink reads only the magic and header_len, to find where the
+// payload starts. If the magic is absent, or header_len is out of range or
+// beyond the plaintext, nothing is forwarded, payload_abort is called once on
+// payload_sink (when not NULL), and finish reports PV_ERR_NOT_ITEM or
+// PV_ERR_ITEM_MALFORMED. finish validates every field and the length; on
+// success it writes header_out and leaves payload_sink to the caller. abort
+// also aborts payload_sink unless that already happened. Both free the item
+// sink.
+int pv_sink_item_new(pv_sink* payload_sink, void (*payload_abort)(pv_sink*), pv_sink* out);
+int pv_sink_item_finish(pv_sink* s, uint64_t plaintext_len, pv_item_header* header_out);
+void pv_sink_item_abort(pv_sink* s);
 
 #ifdef __cplusplus
 }

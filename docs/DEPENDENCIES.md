@@ -52,20 +52,70 @@ APIs used and the documentation pages checked on 2026-10-12:
 | Android SDK | platforms android-35, build-tools 37.0.0 and 35.0.0 (the latter installed by AGP 8.8.2 on the first build, 2026-10-13), platform-tools 37.0.1, cmdline-tools 23.0.0, emulator 37.2.12, system image android-35 google_apis_playstore x86_64 rev 9 |
 | Android NDK | 29.0.14206865 (r29), clang 21.0.0 based on r563880c, platforms 21 to 35. See `docs/DECISIONS.md` D-003. |
 | JDK | OpenJDK 21.0.4 (Android Studio JBR) |
-| Android Studio | AI-242.23726.103 (Ladybug Feature Drop 2024.2.2) |
+| Android Studio | AI-242.23726.103 (Ladybug Feature Drop 2024.2.2); supports AGP up to 8.8, so it cannot open the project after D-012 until the developer updates it |
 
 ## Gradle and Android Gradle Plugin
 
 | | |
 |---|---|
-| Gradle | 8.10.2, distribution `gradle-8.10.2-bin.zip` from https://services.gradle.org/distributions/, SHA-256 `31c55713e40233a8303827ceb42ca48a47267a0ad4bab9177123121e71524c26` (from `gradle-8.10.2-bin.zip.sha256`, 2026-10-12) pinned in `gradle-wrapper.properties` as `distributionSha256Sum` |
-| Wrapper jar | `gradle-wrapper.jar` from https://github.com/gradle/gradle at tag `v8.10.2`, SHA-256 `2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046`, matching https://services.gradle.org/distributions/gradle-8.10.2-wrapper.jar.sha256 (checked 2026-10-12). `gradlew` and `gradlew.bat` from the same tag. |
+| Gradle | 8.11.1 (Phase 2, D-012; Phase 1 used 8.10.2), distribution `gradle-8.11.1-bin.zip` from https://services.gradle.org/distributions/, SHA-256 `f397b287023acdba1e9f6fc5ea72d22dd63669d59ed4a289a29b1a76eee151c6` (from `gradle-8.11.1-bin.zip.sha256`, 2026-10-13) pinned in `gradle-wrapper.properties` as `distributionSha256Sum` |
+| Wrapper jar | `gradle-wrapper.jar` SHA-256 `2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046`, matching https://services.gradle.org/distributions/gradle-8.11.1-wrapper.jar.sha256 (checked 2026-10-13) and the jar at tag `v8.11.1` of https://github.com/gradle/gradle. The jar, `gradlew`, and `gradlew.bat` are byte for byte the same as at tag `v8.10.2`, so the Phase 1 files were kept. |
 | Gradle license | Apache 2.0 |
-| Android Gradle Plugin | 8.8.2 (requires Gradle 8.10.2 or later, JDK 17 or later; supported by the installed Android Studio). Fetched from Google Maven by Gradle, verified by Gradle's dependency resolution. License Apache 2.0. |
+| Android Gradle Plugin | 8.9.3 (Phase 2, D-012; Phase 1 used 8.8.2). Requires Gradle 8.11.1 or later, JDK 17 or later, build-tools 35.0.0. Not supported by Android Studio Ladybug Feature Drop; Meerkat (2024.3.1) or later opens it. Fetched from Google Maven by Gradle, verified by Gradle's dependency resolution. License Apache 2.0. |
 | Kotlin Gradle plugin | `org.jetbrains.kotlin.android` 2.1.10, pinned in `android/settings.gradle.kts`. License Apache 2.0. |
 | AndroidX and JUnit | main source set: none. `androidTest` only: `androidx.test:runner:1.6.2`, `androidx.test.ext:junit:1.2.1` (Apache 2.0), `junit:junit:4.13.2` (EPL 1.0). Pinned in `android/app/build.gradle.kts`. |
 
 Gradle downloads go to `GRADLE_USER_HOME=D:\Android\gradle`.
+
+## Phase 2 dependency metadata check (2026-10-13)
+
+Read from `META-INF/com/android/build/gradle/aar-metadata.properties` inside each AAR
+downloaded from https://dl.google.com/android/maven2/ (the Google Maven repository Gradle
+uses). The newest stable versions at the time of the check: CameraX 1.6.2 (1.7.0-alpha03 is
+the newest pre-release), media3 1.11.1.
+
+| Artifact | Version | minCompileSdk | minAndroidGradlePluginVersion |
+|---|---|---|---|
+| androidx.camera:camera-core, camera-camera2, camera-lifecycle, camera-view, camera-video | 1.6.2 | 36 | 8.9.1 |
+| same five artifacts | 1.5.3 | 35 | 8.6.0 |
+| same five artifacts | 1.4.2 | 34 | 1.0.0 |
+| androidx.media3:media3-muxer, media3-common | 1.11.1 | 36 | 1.0.0 |
+| androidx.media3:media3-muxer, media3-common | 1.10.1 | 36 | 1.0.0 |
+
+Other facts from the 1.6.2 POMs and AAR contents: license Apache 2.0 for every artifact;
+`camera-core` compiles against `kotlin-stdlib` 2.1.20 and pulls `kotlinx-coroutines` 1.9.0,
+`exifinterface` 1.4.2, `lifecycle-livedata` 2.1.0, `tracing` 1.3.0, `concurrent-futures`
+1.1.0, `listenablefuture` 1.0; `camera-camera2` pulls `camera-camera2-pipe` 1.6.2 and
+`dagger` 2.59 (runtime); `camera-view` pulls `camera-video` 1.6.2, `appcompat` 1.1.0,
+`fragment` 1.1.0, `viewfinder-core` 1.5.1; `camera-video` pulls `media3-muxer` 1.9.0,
+`media3-container` 1.9.0, and `guava` 32.0.1-android. `camera-core` ships two small native
+libraries per ABI (`libimage_processing_util_jni.so`, `libsurface_util_jni.so`). The AAR
+manifests declare no permission and no feature; `camera-core` and `camera-camera2` add a
+disabled, non-exported `MetadataHolderService`. `media3-muxer` has no native code, no
+manifest entries beyond `minSdkVersion 23`, and depends only on `media3-common` and
+`media3-container`.
+
+## Phase 2 Android dependencies (added in Milestone D, 2026-10-13)
+
+All fetched from Google Maven by Gradle and pinned in `android/app/build.gradle.kts`.
+License Apache 2.0 for every artifact below.
+
+| Dependency | Version | Configuration | Role |
+|---|---|---|---|
+| `androidx.camera:camera-core`, `camera-camera2`, `camera-lifecycle`, `camera-view` | 1.6.2 | `implementation` | Photo capture (`ImageCapture` in memory), `PreviewView`, lifecycle binding |
+| `androidx.activity:activity` | 1.10.1 | `implementation` | `ComponentActivity`, the `LifecycleOwner` CameraX binds to (`minCompileSdk` 35) |
+| `androidx.camera:camera-video` | 1.6.2 | `debugImplementation` | Video prototype only: `VideoCapture`, `VideoOutput`, `Recorder` for the V2 probe |
+| `androidx.media3:media3-muxer` | 1.11.1 | `debugImplementation` | Video prototype only: `FragmentedMp4Muxer` |
+| `androidx.test:rules` | 1.6.1 | `androidTestImplementation` | `GrantPermissionRule` for the capture tests |
+
+Transitive facts recorded from the resolved graph (`gradlew app:dependencies`):
+`kotlin-stdlib` is raised from 2.1.10 to 2.1.20 by CameraX; `androidx.core:core` 1.13.0;
+`lifecycle` 2.6.2; `camera-camera2-pipe` 1.6.2 with `dagger` 2.59 and `atomicfu` 0.28.0;
+`profileinstaller` 1.4.0 and `startup-runtime` 1.1.1 (their manifest entries are removed,
+D-013). In the release variant `camera-view` still pulls `camera-video` 1.6.2, which pulls
+`media3-muxer`, `media3-container`, and `media3-common` 1.9.0 and `guava` 32.0.1-android;
+the release variant therefore contains media3 classes it never calls. The debug APK is
+17.6 MB against 4.1 MB in Phase 1, mostly CameraX, media3, guava, and their dependencies.
 
 ## Not used
 

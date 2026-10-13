@@ -284,13 +284,38 @@ int cmd_verify(const Options& o) {
     if (rc != PV_OK) {
         return fail(rc);
     }
-    uint64_t len = 0;
-    rc = pv_vault_verify(v, id, &len);
-    pv_vault_close(v);
+    // Decrypt through the item sink so item fields can be printed. The payload
+    // goes to a null sink; nothing is written to disk.
+    pv_sink null_sink{nullptr, [](void*, const uint8_t*, size_t) { return 0; }};
+    pv_sink item{};
+    rc = pv_sink_item_new(&null_sink, nullptr, &item);
     if (rc != PV_OK) {
+        pv_vault_close(v);
         return fail(rc);
     }
+    uint64_t len = 0;
+    rc = pv_vault_decrypt(v, id, &item, &len);
+    pv_vault_close(v);
+    if (rc != PV_OK) {
+        pv_sink_item_abort(&item);
+        return fail(rc);
+    }
+    pv_item_header h{};
+    int item_rc = pv_sink_item_finish(&item, len, &h);
     std::printf("ok %llu\n", static_cast<unsigned long long>(len));
+    if (item_rc == PV_OK) {
+        const char* type = h.media_type == PV_MEDIA_JPEG             ? "jpeg"
+                           : h.media_type == PV_MEDIA_VIDEO_SEGMENT ? "video_segment"
+                                                                    : "video_index";
+        std::printf("item: %s %ux%u rotation %u created %llu payload %llu\n", type, h.width,
+                    h.height, h.rotation_degrees,
+                    static_cast<unsigned long long>(h.created_unix_ms),
+                    static_cast<unsigned long long>(h.payload_len));
+    } else if (item_rc == PV_ERR_NOT_ITEM) {
+        std::printf("item: unknown\n");
+    } else {
+        std::printf("item: %s\n", pv_error_name(item_rc));
+    }
     return 0;
 }
 

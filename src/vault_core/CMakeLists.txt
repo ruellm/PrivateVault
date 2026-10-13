@@ -5,6 +5,7 @@ add_library(vault_core STATIC
     src/object.cpp
     src/vault.cpp
     src/streams.cpp
+    src/item.cpp
 )
 
 target_include_directories(vault_core

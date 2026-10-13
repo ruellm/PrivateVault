@@ -1,21 +1,24 @@
 # PrivateVault
 
-R&D for a decentralized, privately stored media vault. Phase 1 builds the encrypted storage
+R&D for a decentralized, privately stored media vault. Phase 1 built the encrypted storage
 core (C++20, libsodium), a Windows command line tool, and an Android proof of concept that
-share one object format.
+share one object format. Phase 2 adds in-app photo capture straight into encrypted objects,
+a plaintext exposure scan, and a video feasibility prototype.
 
 This is a research prototype. It has not been audited and must not hold real private media.
 
 Documents:
 
-- `PROJECT_HANDOFF.md`: the brief for Phase 1.
+- `PROJECT_HANDOFF.md`: the project brief and Phase 1 specification; `PHASE2_BRIEF.md` (developer supplied) for Phase 2.
 - `docs/PHASE1_DESIGN.md`: object and envelope formats, key hierarchy, C ABI.
+- `docs/PHASE2_DESIGN.md`: capture pipeline, media item header, ABI additions, leak scan, video options.
+- `docs/VIDEO_CAPTURE_FEASIBILITY.md`: what was tried for video, measurements, recommendation.
 - `docs/THREAT_MODEL.md`: what the prototype defends against and what it does not.
 - `docs/DEPENDENCIES.md`: pinned versions, sources, licenses, verification.
 - `docs/DECISIONS.md`: engineering choices with alternatives.
 - `docs/CONTAINER_FEASIBILITY.md`: why TrueCrypt-style containers are not the foundation.
-- `docs/PHASE1_PROGRESS.md`: state of the work and commands run.
-- `docs/PHASE1_TEST_REPORT.md`: results per test tier.
+- `docs/PHASE1_PROGRESS.md`, `docs/PHASE2_PROGRESS.md`: state of the work and commands run.
+- `docs/PHASE1_TEST_REPORT.md`, `docs/PHASE2_TEST_REPORT.md`: results per test tier.
 
 ## Layout
 
@@ -52,8 +55,10 @@ docs/                design, threat model, dependencies, decisions, reports
   The first configure builds libsodium 1.0.22 from the pinned source (about 2 minutes for
   Windows, about 7 minutes per Android ABI) and stores it in the binary cache.
 
-- For Android: Android SDK with platform 35, NDK r29 (`29.0.14206865`), SDK CMake 4.1.2, and
-  a JDK 17 or later. Set `ANDROID_HOME`, `ANDROID_NDK_HOME`, and `JAVA_HOME`.
+- For Android: Android SDK with platforms 35 and 36, build-tools 35.0.0, NDK r29
+  (`29.0.14206865`), SDK CMake 4.1.2, and a JDK 17 or later. Set `ANDROID_HOME`,
+  `ANDROID_NDK_HOME`, and `JAVA_HOME`. Android Studio Meerkat (2024.3.1) or later opens the
+  project (AGP 8.9).
 
 ## Build and test on Windows (T1)
 
@@ -79,7 +84,7 @@ vectors in `tests/fixtures/v1` are committed; regenerate only on purpose with
 pv init <vault_dir>                          create a vault; asks for a password twice
 pv encrypt <vault_dir> <file> [--chunk-size N]   prints the new object id
 pv decrypt <vault_dir> <object_id> <out_file>    writes <out_file>.pvtmp, renames on success
-pv verify <vault_dir> <object_id>                decrypts into a hash, prints the length
+pv verify <vault_dir> <object_id>                decrypts into a hash, prints the length and the item fields
 pv inspect <vault_dir> <object_id>               header fields, no password needed
 pv inspect-file <path.pvo>
 pv version
@@ -99,14 +104,20 @@ cmake --preset android-x64   && cmake --build --preset android-x64
 ## Android app (T2, T3)
 
 Set `VCPKG_ROOT`, `ANDROID_HOME`, and `JAVA_HOME`. The Gradle wrapper downloads Gradle
-8.10.2 (checksum pinned) into `GRADLE_USER_HOME`; AGP 8.8.2 installs `build-tools/35.0.0`
+8.11.1 (checksum pinned) into `GRADLE_USER_HOME`; AGP 8.9.3 installs `build-tools/35.0.0`
 into the SDK if it is missing.
 
 ```
 cd android
 gradlew.bat assembleDebug                 # app\build\outputs\apk\debug\app-debug.apk
+gradlew.bat lintDebug                     # RestrictedApi is an error
 gradlew.bat connectedDebugAndroidTest     # T2: needs a booted emulator or a connected device
+gradlew.bat assembleBenchmark             # non-debuggable, optimized native code, debug signing key
 ```
+
+The app asks for `CAMERA` at runtime on the capture screen and declares no other
+permission. The benchmark variant has no `run-as` access and no test hooks; its results
+come from logcat.
 
 To keep the test APK off a phone that is also connected, pin the target:
 `$env:ANDROID_SERIAL = "emulator-5554"`.
@@ -118,9 +129,15 @@ emulator -avd Pixel_8_API_35 -no-window -no-audio -no-boot-anim -no-snapshot -gp
 adb -e shell getprop sys.boot_completed   # wait for 1
 ```
 
-T3 steps on a device, scripted through the activity's `actions` extra (debug build only).
-Results appear in logcat under the tag `PrivateVault` and on screen. The extra is read in
-`onCreate`, so force-stop the app before each launch:
+T3 steps on a device, scripted through the `actions` extra of `MainActivity`. Results appear
+in logcat under the tag `PrivateVault` and on screen. The extra is read in `onCreate`, so
+force-stop the app before each launch. Capture actions (`capture_photo`,
+`capture_photo_n=<n>`, `flip`, `memory`, `video_probe`, `v2_probe`, `test_hook_slow=<ms>`,
+`test_hook_clear`) hand the rest of the list to the capture screen, which needs the camera
+permission granted (`adb shell pm grant com.privatevault.app android.permission.CAMERA` on a
+test device, or the on-screen dialog). Other actions: `open`, `encrypt_1mb`, `encrypt_100mb`,
+`verify_all` (alias `verify`), `list`, `leak_scan`, `tamper`, `truncation`, `wrong_key`,
+`security_level`, `close`:
 
 ```
 adb install app-debug.apk
@@ -131,8 +148,19 @@ adb reboot          # unlock the device afterwards; the Keystore key needs an un
 adb shell am start -n com.privatevault.app/.MainActivity --es actions open,verify
 adb shell am force-stop com.privatevault.app
 adb shell am start -n com.privatevault.app/.MainActivity --es actions open,tamper,truncation,wrong_key,security_level
+adb shell am start -n com.privatevault.app/.MainActivity --es actions open,capture_photo_n=10,verify_all,list,leak_scan
+adb shell am start -n com.privatevault.app/.MainActivity --es actions open,video_probe,leak_scan     # debug build only
 adb logcat -d -s PrivateVault:I
 ```
+
+Lock-bound key check on the emulator (never on a phone with personal data): set a
+temporary PIN with `adb shell locksettings set-pin <pin>`, remove the app vault
+(`adb shell run-as com.privatevault.app rm -r files/vault`), run `open,encrypt_1mb,verify_all`
+and read `key mode: lock-bound`, lock the screen with `adb shell input keyevent KEYCODE_SLEEP`,
+launch `open,verify_all` again and expect `[open] FAIL ... Device locked`, unlock
+(`KEYCODE_WAKEUP`, `KEYCODE_MENU`, `input text <pin>`, `KEYCODE_ENTER`), rerun and expect
+success, then `adb shell locksettings clear --old <pin>`. The instrumented
+`LockBoundKeyTest` runs only while a PIN is set.
 
 On MIUI phones `adb install` needs "Install via USB" enabled under Developer options
 (MIUI asks for a Mi account) and the on-screen confirmation accepted for every install;
@@ -151,6 +179,8 @@ adb shell am instrument -w -e class com.privatevault.app.GoldenVectorTest#export
 for n in $(adb shell run-as com.privatevault.app ls files/pv_export | tr -d '\r'); do adb exec-out run-as com.privatevault.app cat files/pv_export/$n > out/$n; done
 build\windows-x64-tests\tests\core\Release\test_golden.exe <absolute path to out>
 ```
+
+The export includes three item-wrapped vectors; `test_golden` prints `item` for them.
 
 The app stores the vault under `filesDir/vault/` (internal app-private storage). Uninstall,
 Clear Data, and factory reset destroy the Keystore key and with it the vault.

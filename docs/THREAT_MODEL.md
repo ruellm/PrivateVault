@@ -1,9 +1,10 @@
-# Threat model: Phase 1 encrypted storage prototype
+# Threat model: encrypted storage and capture prototype
 
-Written 2026-10-12 for the Milestone B checkpoint. It covers only what Phase 1 builds: an
-encrypted object store on Windows (password protected) and Android (Keystore protected), with
-synthetic test data. Sharing, capture, viewing, and networking are later phases and will need
-their own threat models.
+Written 2026-10-12 for the Phase 1 Milestone B checkpoint; extended 2026-10-13 for Phase 2
+(Section 6). It covers what Phases 1 and 2 build: an encrypted object store on Windows
+(password protected) and Android (Keystore protected), and in-app photo capture into that
+store on Android. Sharing, viewing, and networking are later phases and will need their own
+threat models.
 
 This document describes the prototype's intended properties. It does not claim that the
 prototype has been audited or that it is suitable for real private media.
@@ -109,3 +110,38 @@ prototype has been audited or that it is suitable for real private media.
 - Passwords only through the no-echo prompt or `--password-stdin`.
 - Test-only key injection is compiled only with `PV_TEST_HOOKS=ON` on the desktop and only in
   the `androidTest` source set on Android.
+
+## 6. Phase 2 additions: capture
+
+What Phase 2 claims, and only this: **app code writes no plaintext media to storage, and
+nothing in app-visible locations contains it** (checked by the `leak_scan` action and test:
+app data directories, external app directories, MediaStore rows owned by the app, logcat).
+Everything below the app is outside that claim.
+
+### 6.1 New assets
+
+| Asset | Where it lives | Lifetime |
+|---|---|---|
+| Captured JPEG bytes | The `ImageReader` buffer behind the CameraX `ImageProxy` (native memory the camera stack owns); read in place by the core through the memory source | Until `ImageProxy.close()`; not zeroed by the app |
+| The same frame before encoding | Camera HAL buffers, image signal processor, gralloc buffers, the preview `Surface`, and any internal CameraX copy (its software JPEG and effects paths use Java byte arrays; on the emulator the in-memory path delivered a direct buffer straight from the HAL stream) | Camera stack lifetime; not under app control |
+| Item header (type, rotation, size, capture time) | Inside the encrypted plaintext of the object | As long as the object |
+| Video segments and index (prototype only) | `FragmentedMp4Muxer` Java buffers, a Java `ByteArrayOutputStream` per segment, one native guarded copy for encryption; debug verification reads segments back into Java arrays | Until the segment is encrypted; the Java copies are subject to garbage collection timing |
+
+### 6.2 New threats and the Phase 2 position
+
+| # | Threat | Position |
+|---|---|---|
+| T10 | Screenshot, screen recording, or the recents thumbnail shows the viewfinder | `FLAG_SECURE` on the capture activity. Verified on the emulator: `screencap` of the capture screen and of the recents card are black. Not verified on the phone (not connected). |
+| T11 | A capture leaves plaintext in app storage (temporary files, caches, crash files) | No file output path exists in the capture code (`OutputFileOptions`, `OnImageSavedCallback`, `MediaStore` output, `FileOutputStream` are absent from `src/main` except the read-only MediaStore query of the scan). `leak_scan` after captures and after both video probes found 0 markers and no new files besides `objects/*.pvo` on the emulator. |
+| T12 | A capture leaves plaintext in the shared media collections | No MediaStore output is used; `leak_scan` queries images, video, and files for rows owned by the app: 0. |
+| T13 | Image bytes copied into the Kotlin heap by app code | On the emulator every capture arrived in a direct buffer and was read in place (`buffer=DIRECT` in every log line). The heap-array fallback (one native copy into guarded memory from a CameraX-made array) and the last-resort Kotlin copy exist in `Vault.encryptItem` and are reported in the log line when taken; the Kotlin copy path never ran on the emulator. |
+| T14 | Interrupted capture leaves a half object | The core's `.partial` plus rename rule from Phase 1. Verified: a kill during a slowed encrypt left one `.partial` which the next open removed; verify of all other objects passed. |
+| T15 | Metadata: sizes and times | Object sizes still equal plaintext size plus 48 bytes of item header plus chunk overhead, so photos (hundreds of KB to several MB), video segments (about 1 MB each, several per clip), and the small index object are distinguishable by size; object mtimes equal capture times to within the encrypt time; a clip's length is the count of segments. Unchanged position: documented, not hidden. The item header itself (orientation, dimensions, capture time) is encrypted. |
+| T16 | Camera permission misuse | Only `CAMERA` is requested, at runtime, from the capture screen. `ACCESS_NETWORK_STATE` declared by a media3 library is removed from the merged manifest (D-013). No location permission, so no GPS reaches any EXIF data. |
+
+### 6.3 Outside app control, not verifiable without root
+
+Camera HAL and vendor buffers (`/data/vendor` dumps, ISP memory), MIUI system services on
+the phone, kernel and GPU buffers, swap and zram contents, the `ImageReader` buffer after
+`close()`, and any copy CameraX makes internally. The prototype does not claim erasure of
+any of these. The Kotlin `ByteArray` copy of the VMK from Phase 1 is unchanged.

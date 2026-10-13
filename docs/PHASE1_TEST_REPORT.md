@@ -43,8 +43,9 @@ open test failures.
   `init`, `encrypt`, `decrypt`, `verify`, `inspect`, `inspect-file`, test-only options behind
   `PV_TEST_HOOKS`.
 - **Android adapter** (`android/`): Kotlin `KeystoreKeyProvider` (AES-256-GCM key in Android
-  Keystore, randomized IV, `setUnlockedDeviceRequired(true)`, StrongBox attempted with
-  fallback, provider 2 envelope with AAD), `Vault`, `MainActivity` (buttons plus a scripted
+  Keystore, randomized IV, `setUnlockedDeviceRequired(true)` only when the device has a
+  secure lock screen (D-010), StrongBox attempted with fallback, provider 2 envelope with
+  AAD), `Vault`, `MainActivity` (buttons plus a scripted
   `actions` extra), JNI bridge over the C ABI. One shared library per ABI with the core and
   libsodium linked statically, C++ runtime static, 16 KB aligned.
 - Why: per Sections 2.4 to 2.7 of the handoff. The core never sees a password, a Keystore
@@ -289,7 +290,7 @@ No TrueCrypt or VeraCrypt code, no test framework beyond CTest, no networking or
 - `src/desktop_cli/`: `envelope.{h,cpp}`, `password.{h,cpp}`, `main.cpp`, `CMakeLists.txt`.
 - `tests/core/`: `check.h`, `test_support.h`, eleven `test_*.cpp`, `CMakeLists.txt`; `tests/tools/make_vectors.cpp`; `tests/fixtures/v1/` (8 `.pvo`, `manifest.txt`, `README.md`, `test_vmk.txt`, `test_seed.txt`).
 - `android/`: Gradle wrapper and build files, `app/src/main/cpp/{CMakeLists.txt,jni_bridge.cpp}`, `app/src/main/java/com/privatevault/app/{NativeBridge,KeystoreKeyProvider,Vault,MainActivity}.kt`, manifest and backup rules, `app/src/androidTest/.../{NativeInitTest,VaultTest,KeystoreTest,GoldenVectorTest,TestKeys}.kt`.
-- `docs/`: `PHASE1_DESIGN.md`, `THREAT_MODEL.md`, `DEPENDENCIES.md`, `CONTAINER_FEASIBILITY.md`, `DECISIONS.md` (D-001 to D-009), `ROADMAP.md`, `PHASE1_PROGRESS.md`, this report.
+- `docs/`: `PHASE1_DESIGN.md`, `THREAT_MODEL.md`, `DEPENDENCIES.md`, `CONTAINER_FEASIBILITY.md`, `DECISIONS.md` (D-001 to D-011), `ROADMAP.md`, `PHASE1_PROGRESS.md`, this report.
 
 ## Unresolved risks and next actions
 
@@ -318,7 +319,7 @@ No TrueCrypt or VeraCrypt code, no test framework beyond CTest, no networking or
 | Windows core builds and all T1 tests pass | Pass (11/11 Debug and Release) |
 | Android debug app builds reproducibly | Pass (`gradlew assembleDebug`, pinned Gradle, AGP, NDK, vcpkg baseline) |
 | Merged manifest has no INTERNET or storage permissions; backup disabled | Pass |
-| T2 tests pass on an emulator or device | Pass (15/15 on emulator) |
+| T2 tests pass on an emulator or device | Pass (17/17 on emulator) |
 | T3 tests pass if a device is available, otherwise blocker and remaining steps explicit | Pass (Xiaomi 2201116SG: install, create, encrypt 1 MB and 100 MB, verify, force-stop and relaunch, reboot and verify, tamper, truncation, wrong key; Keystore level TRUSTED_ENVIRONMENT) |
 | Encryption and decryption are chunked and authenticated | Pass |
 | Wrong key, tampering, truncation, trailing data fail closed | Pass (with the D-007 code mapping) |

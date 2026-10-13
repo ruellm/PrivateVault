@@ -1,5 +1,7 @@
 package com.privatevault.app
 
+import java.nio.ByteBuffer
+
 // Kotlin side of the JNI bridge. Every call goes to android/app/src/main/cpp/jni_bridge.cpp
 // and from there to the core C ABI. Status codes are the PV_* codes from pv/pv.h; the
 // constants below mirror that header one to one.
@@ -25,11 +27,20 @@ object NativeBridge {
     const val ERR_OUT_OF_MEMORY = 18
     const val ERR_INTERNAL = 19
     const val ERR_NOT_FOUND = 20
+    const val ERR_ITEM_MALFORMED = 21
+    const val ERR_ITEM_UNSUPPORTED = 22
+    // Classification, not corruption: the plaintext has no item header.
+    const val ERR_NOT_ITEM = 23
 
     const val VMK_BYTES = 32
     const val OBJECT_ID_BYTES = 16
     const val HASH_BYTES = 32
     const val SEED_BYTES = 32
+
+    const val MEDIA_JPEG = 1
+    const val MEDIA_VIDEO_SEGMENT = 2
+    const val MEDIA_VIDEO_INDEX = 3
+    const val ITEM_HEADER_BYTES = 48
 
     init {
         System.loadLibrary("privatevault_jni")
@@ -65,11 +76,43 @@ object NativeBridge {
     external fun nativeEncryptSampleFile(
         path: String, vmk: ByteArray, seed: ByteArray, length: Long, chunkSize: Int, idOut: ByteArray
     ): Int
+    external fun nativeEncryptItemSampleFile(
+        path: String, vmk: ByteArray, seed: ByteArray, payloadLen: Long, fields: LongArray,
+        idOut: ByteArray
+    ): Int
 
     external fun nativeFileWriteAtomic(path: String, data: ByteArray): Int
     external fun nativeFileReadAll(path: String): ByteArray?
     external fun nativeFileDelete(path: String): Int
     external fun nativeProbeLink(dir: String): Int
+
+    // Phase 2. fields = [media_type, rotation_degrees, width, height, created_unix_ms].
+    // Direct buffer: the native side reads the bytes in place.
+    external fun nativeEncryptItem(
+        handle: Long, buffer: ByteBuffer, offset: Int, length: Int, fields: LongArray,
+        idOut: ByteArray, lenOut: LongArray
+    ): Int
+    // Heap array: one native copy into guarded memory, then the same path.
+    external fun nativeEncryptItemArray(
+        handle: Long, data: ByteArray, offset: Int, length: Int, fields: LongArray,
+        idOut: ByteArray, lenOut: LongArray
+    ): Int
+    // Returns the decrypt status. itemStatus[0] is the item verdict (OK, ERR_NOT_ITEM, ...).
+    // infoOut = [media_type, rotation, width, height, created_unix_ms, payload_len,
+    // header_len, plaintext_len]. hashOut is the BLAKE2b of the payload when the
+    // verdict is OK.
+    external fun nativeDecryptVerifyItem(
+        handle: Long, id: ByteArray, hashOut: ByteArray, infoOut: LongArray, itemStatus: IntArray
+    ): Int
+    external fun nativeDecryptFileItem(
+        path: String, vmk: ByteArray, expectedId: ByteArray?, hashOut: ByteArray,
+        infoOut: LongArray, itemStatus: IntArray
+    ): Int
+
+    // Debug variant only (PV_DEBUG_HOOKS). Missing from the release library.
+    external fun nativeDecryptToArray(handle: Long, id: ByteArray, maxLen: Int, statusOut: IntArray): ByteArray?
+    external fun nativeHashDirectBuffer(buffer: ByteBuffer, offset: Int, length: Int, hashOut: ByteArray): Int
+    external fun nativeSetTestHooks(slowReadMs: Int, failAfterBytes: Long)
 
     // Name plus the raw value, so an unexpected code is never hidden.
     fun errorName(code: Int): String = "${nativeErrorName(code)} ($code)"

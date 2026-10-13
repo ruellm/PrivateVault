@@ -85,6 +85,7 @@ int main() {
     // verify, inspect (no password), decrypt.
     CHECK_EQ(run("verify " + vault + " " + id + " --password-stdin", kPwFile), 0);
     CHECK(contains(read_text(kOut), "ok 131079"));
+    CHECK(contains(read_text(kOut), "item: unknown"));   // not item-wrapped
     CHECK_EQ(run("inspect " + vault + " " + id), 0);
     CHECK(contains(read_text(kOut), "chunk_size 65536"));
     CHECK(contains(read_text(kOut), "object_id " + id));

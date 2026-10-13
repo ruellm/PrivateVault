@@ -1,6 +1,7 @@
 package com.privatevault.app
 
 import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -10,25 +11,29 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import java.io.File
 import java.io.RandomAccessFile
 import java.util.concurrent.Executors
 
 // Minimal proof-of-concept screen. Every action runs on a worker thread and
 // prints a line with pass or fail. Nothing shown or logged is a key, a
-// password, or sample content; object IDs and hashes of synthetic data are
-// the only values printed.
+// password, or capture content; object IDs, item fields, and hashes of
+// synthetic data are the only values printed.
 class MainActivity : Activity() {
 
     private val executor = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     private lateinit var log: TextView
     private lateinit var scroll: ScrollView
-    private var vault: Vault? = null
-    private val provider by lazy { KeystoreKeyProvider(this) }
+    private val vaults: VaultSession by lazy { PvApp.of(this).vaultSession }
+    private val provider: KeystoreKeyProvider get() = vaults.provider
 
     // Public test seed; the same stream the host tests use.
     private val seed = "PRIVATEVAULT TEST ONLY SEED 0001".toByteArray(Charsets.US_ASCII)
+
+    // Actions that need the capture screen; the rest of the list goes with them.
+    private val captureActions = setOf(
+        "capture_photo", "video_probe", "v2_probe", "flip", "memory", "test_hook_slow", "test_hook_clear"
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -44,9 +49,12 @@ class MainActivity : Activity() {
             })
         }
         button("Create or open vault") { createOrOpen() }
+        button("Capture (camera)") { main.post { openCapture(emptyList()) } }
         button("Encrypt 1 MB sample") { encrypt(1L shl 20) }
         button("Encrypt 100 MB sample") { encrypt(100L shl 20) }
-        button("Decrypt and verify all objects") { verifyAll() }
+        button("Verify all objects") { ObjectActions.verifyAll(vaults, ::say) }
+        button("List objects") { ObjectActions.list(vaults, ::say) }
+        button("Leak scan") { for (l in LeakScan.run(this).lines()) say(l) }
         button("Tamper test") { tamperTest() }
         button("Truncation test") { truncationTest() }
         button("Wrong key test") { wrongKeyTest() }
@@ -75,7 +83,7 @@ class MainActivity : Activity() {
         handleScriptedActions(intent)
     }
 
-    override fun onNewIntent(intent: android.content.Intent?) {
+    override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         handleScriptedActions(intent)
     }
@@ -83,14 +91,20 @@ class MainActivity : Activity() {
     // Scripted driving for the T3 device steps (debug proof of concept only):
     //   adb shell am start -n com.privatevault.app/.MainActivity --es actions open,encrypt_1mb,verify
     // Actions run in order on the worker thread and print to the log and logcat.
-    private fun handleScriptedActions(intent: android.content.Intent?) {
+    // A capture action hands itself and everything after it to CaptureActivity.
+    private fun handleScriptedActions(intent: Intent?) {
         val list = intent?.getStringExtra("actions") ?: return
-        for (name in list.split(',').map { it.trim() }.filter { it.isNotEmpty() }) {
+        val names = list.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        val handoff = names.indexOfFirst { n -> captureActions.any { n == it || n.startsWith("${it}_n=") || n.startsWith("$it=") } }
+        val local = if (handoff < 0) names else names.subList(0, handoff)
+        for (name in local) {
             val action: () -> Unit = when (name) {
                 "open" -> ::createOrOpen
                 "encrypt_1mb" -> { { encrypt(1L shl 20) } }
                 "encrypt_100mb" -> { { encrypt(100L shl 20) } }
-                "verify" -> ::verifyAll
+                "verify", "verify_all" -> { { ObjectActions.verifyAll(vaults, ::say) } }
+                "list" -> { { ObjectActions.list(vaults, ::say) } }
+                "leak_scan" -> { { for (l in LeakScan.run(this).lines()) say(l) } }
                 "tamper" -> ::tamperTest
                 "truncation" -> ::truncationTest
                 "wrong_key" -> ::wrongKeyTest
@@ -100,12 +114,22 @@ class MainActivity : Activity() {
             }
             run(name, action)
         }
-        executor.execute { say("[scripted] all actions finished") }
+        if (handoff >= 0) {
+            val rest = names.subList(handoff, names.size)
+            executor.execute { main.post { openCapture(rest) } }
+        } else {
+            executor.execute { say("[scripted] all actions finished") }
+        }
+    }
+
+    private fun openCapture(actions: List<String>) {
+        val i = Intent(this, CaptureActivity::class.java)
+        if (actions.isNotEmpty()) i.putExtra(CaptureActivity.EXTRA_ACTIONS, actions.joinToString(","))
+        startActivity(i)
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        vault?.close()
         executor.shutdown()
     }
 
@@ -147,15 +171,10 @@ class MainActivity : Activity() {
         return parts.joinToString(" <- ")
     }
 
-    private fun requireVault(): Vault = vault ?: throw IllegalStateException("vault not open")
+    private fun requireVault(): Vault = vaults.vault ?: throw IllegalStateException("vault not open")
 
     private fun createOrOpen() {
-        vault?.close()
-        vault = if (Vault.exists(filesDir)) {
-            Vault.open(filesDir, provider).also { say("opened existing vault") }
-        } else {
-            Vault.create(filesDir, provider).also { say("created new vault") }
-        }
+        say(vaults.openOrCreate())
         say(provider.describe())
         say("objects in vault: ${requireVault().listObjectIds().size}")
     }
@@ -163,23 +182,6 @@ class MainActivity : Activity() {
     private fun encrypt(length: Long) {
         val id = requireVault().encryptSample(seed, length)
         say("encrypted $length bytes -> ${NativeBridge.hex(id)}")
-    }
-
-    private fun verifyAll() {
-        val v = requireVault()
-        val ids = v.listObjectIds()
-        if (ids.isEmpty()) say("no objects")
-        for (id in ids) {
-            val (rc, result) = v.decryptVerify(id)
-            if (rc != NativeBridge.OK || result == null) {
-                say("${NativeBridge.hex(id)}: FAIL ${NativeBridge.errorName(rc)}")
-                continue
-            }
-            val expect = ByteArray(NativeBridge.HASH_BYTES)
-            NativeBridge.nativeHashDeterministic(seed, result.length, expect)
-            val ok = expect.contentEquals(result.hash)
-            say("${NativeBridge.hex(id)}: ${result.length} bytes, hash ${if (ok) "matches" else "MISMATCH"}")
-        }
     }
 
     // Encrypts a small object, damages one ciphertext byte, expects AUTH_FAILED,
@@ -240,8 +242,7 @@ class MainActivity : Activity() {
     }
 
     private fun closeVault() {
-        vault?.close()
-        vault = null
+        vaults.close()
         say("vault closed")
     }
 }

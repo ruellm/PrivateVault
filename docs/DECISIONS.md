@@ -1,7 +1,8 @@
 # Decisions
 
-Non-obvious engineering choices made during Phase 1, with the alternatives considered.
-Entries are dated. Items marked "pending" wait for developer approval at the Milestone B checkpoint.
+Non-obvious engineering choices, with the alternatives considered. Entries are dated.
+D-001 to D-011 are Phase 1; the Phase 1 checkpoint is done and none of them is pending.
+Phase 2 entries start at D-012.
 
 ## D-001 vcpkg clone on drive D instead of the Visual Studio bundled vcpkg (2026-10-12)
 
@@ -161,3 +162,89 @@ name, the raw status, and that platform error. The Kotlin constants mirror every
 Regression test: `VaultTest.openReportsStatusAndHandleSeparately` checks the status and
 handle paths and the raw-code formatting. The tagging itself cannot be reproduced on the
 x86_64 emulator; only an arm64 target shows it.
+
+## D-012 Phase 2 toolchain: AGP 8.9.3, Gradle 8.11.1, compileSdk 36 (2026-10-13)
+
+Choice (Phase 2 brief, decision P2-1, option U): the Android project moves to compileSdk 36,
+Android Gradle Plugin 8.9.3, and Gradle 8.11.1. targetSdk stays 35 and minSdk stays 28.
+
+Why: the AAR metadata of the newest stable CameraX (1.6.2) declares `minCompileSdk=36` and
+`minAndroidGradlePluginVersion=8.9.1`; `androidx.media3:media3-muxer` 1.11.1 declares
+`minCompileSdk=36`. AGP 8.9 is the lowest line that satisfies 8.9.1, and Gradle 8.11.1 is the
+minimum for AGP 8.9. 8.9.3 is the last patch release of that line. No dependency forces
+targetSdk 36, so the target stays where Phase 1 tested it. Platform android-36 was already
+installed in the SDK, so no SDK component had to be added for this change; build-tools 35.0.0
+(required by AGP 8.9) was already present from Phase 1.
+
+Consequence: Android Studio Ladybug Feature Drop (build 242), the version installed in
+Phase 1, cannot open an AGP 8.9 project. Command line builds do not need the IDE. The
+developer updates Android Studio when IDE use is wanted; any version from Meerkat
+(2024.3.1) on supports AGP 8.9.
+
+Alternative (option P): stay on AGP 8.8.2 and compileSdk 35 with CameraX 1.5.3
+(`minCompileSdk=35`, `minAndroidGradlePluginVersion=8.6.0`). That would give up the
+CameraX 1.6 line and, because every media3 release checked (1.10.1 and 1.11.1) requires
+compileSdk 36, the video prototype could not use `media3-muxer` at all. Rejected per P2-1.
+
+## D-013 Manifest merge rules remove what the camera dependencies add (2026-10-13)
+
+Found in Milestone D from the merged debug manifest: `androidx.media3:media3-common`
+declares `android.permission.ACCESS_NETWORK_STATE`, and `androidx.profileinstaller`
+(a transitive dependency of `androidx.activity` 1.10.1 and of CameraX) adds an
+`androidx.startup.InitializationProvider` content provider and an exported
+`ProfileInstallReceiver`. The app has no network code, ships no baseline profile, and the
+brief allows no exported component beyond the launcher activity.
+
+Choice: `tools:node="remove"` entries in `android/app/src/main/AndroidManifest.xml` for the
+permission, the provider, and the receiver. The merged manifest after the change carries
+`CAMERA` only (plus the app-private `DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION` that AGP
+declares for every app that targets below 33), two activities (one exported), and the
+disabled, non-exported `MetadataHolderService` that CameraX needs for its configuration
+lookup. Removing a dependency instead was not possible: `media3-common` comes with the
+muxer the video prototype uses (and, in the release variant, with `camera-video` 1.6.2
+through `camera-view`), and `profileinstaller` comes with every current AndroidX activity
+line.
+
+## D-014 Video prototype buffers whole segments instead of streaming them (2026-10-13)
+
+The brief (Section 8.3, item 4) describes the muxer output reaching the core through a
+bounded queue read by a `pv_source` while the muxer writes. The item header approved in
+P2-2 carries `payload_len` at the start of the plaintext, so an object cannot be started
+before its payload length is known. The prototype therefore lets each segment's
+`FragmentedMp4Muxer` write into a bounded in-memory buffer (8 MiB cap), closes the muxer at
+the segment boundary, and only then encrypts the complete segment through the memory
+source on the encrypt thread. At most two completed segments may wait for encryption;
+a third stops the recording with `QUEUE_FULL`, and a segment that would exceed its cap
+stops it with `MUXER_WRITE_FAILED`. Memory stays bounded; nothing spills to disk.
+
+Consequence for the push-style writer question (brief Section 8.4): with a length field
+at the start of the plaintext, a streaming writer would not help video, because the length
+is only known at the end of the segment. Either the segment is complete before encryption
+starts (this prototype) or a future item header version puts the payload length in a
+trailer. The feasibility report records the measured answer.
+
+## D-015 The leak scan must not create the directories it scans (2026-10-13)
+
+Found in T3 on the Xiaomi after the reboot step: `leak_scan` reported one MediaStore row
+owned by the app in the files collection. The row was the empty directory
+`Android/media/com.privatevault.app`, which the scan itself had created on its first run by
+calling `Context.getExternalMediaDirs()` (the `getExternalFilesDirs` and `externalCacheDirs`
+getters likewise created `Android/data/com.privatevault.app/{files,cache}`). The media
+indexer picked the empty directory up during the boot scan. No media was involved and the
+emulator never showed the row because it was not rebooted after the scan.
+
+Choice: `LeakScan.roots()` builds the external paths (`Android/data`, `Android/media`,
+`Android/obb` under the primary external storage and under every volume that
+`StorageManager.getStorageVolumes()` reports on API 30 and later) and walks them only
+when they already exist. No `Context` directory getter is called any more: a first version
+of the fix still used `getExternalMediaDirs()` to find the volumes and recreated the
+directory on the phone during the benchmark run, which a second check caught; the
+instrumented test `LeakScanTest.scanCreatesNoExternalDirectories` now guards it. The
+MediaStore query names every owned row (display name, relative path, MIME type, size) so
+a directory row can be told from a media file. The empty directories made on the phone
+were removed afterwards (`run-as rmdir` for `Android/data/<pkg>`; the shell user for
+`Android/media/<pkg>`, which `run-as` could not delete), and the stale row went away after
+a `scan_file` call on the removed path through `content call`.
+
+Alternative: keep the getters and ignore directory rows. Rejected because the scan is
+supposed to leave the device as it found it.

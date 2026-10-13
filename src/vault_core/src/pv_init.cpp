@@ -45,6 +45,9 @@ const char* pv_error_name(int code) {
         case PV_ERR_OUT_OF_MEMORY: return "PV_ERR_OUT_OF_MEMORY";
         case PV_ERR_INTERNAL: return "PV_ERR_INTERNAL";
         case PV_ERR_NOT_FOUND: return "PV_ERR_NOT_FOUND";
+        case PV_ERR_ITEM_MALFORMED: return "PV_ERR_ITEM_MALFORMED";
+        case PV_ERR_ITEM_UNSUPPORTED: return "PV_ERR_ITEM_UNSUPPORTED";
+        case PV_ERR_NOT_ITEM: return "PV_ERR_NOT_ITEM";
         default: return "PV_ERR_UNKNOWN";
     }
 }
