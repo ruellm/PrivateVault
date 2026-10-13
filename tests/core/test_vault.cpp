@@ -22,6 +22,11 @@ void run_in(const std::string& vault) {
     CHECK_EQ(pv_vault_open(vault.c_str(), ts::test_vmk(), PV_VMK_BYTES, &v), PV_ERR_NOT_FOUND);
     CHECK(v == nullptr);
 
+    // A failed file call records the platform error.
+    pv_source probe{};
+    CHECK_EQ(pv_file_source_open((vault + "/nothing").c_str(), &probe), PV_ERR_NOT_FOUND);
+    CHECK(pv_last_os_error() != 0);
+
     CHECK_EQ(pv_vault_create(vault.c_str()), PV_OK);
     CHECK(ts::path_exists(objects_dir(vault)));
     CHECK_EQ(pv_vault_create(vault.c_str()), PV_OK);  // idempotent

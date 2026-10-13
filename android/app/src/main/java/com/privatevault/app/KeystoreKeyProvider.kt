@@ -1,14 +1,15 @@
 package com.privatevault.app
 
+import android.app.KeyguardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
-import android.security.keystore.StrongBoxUnavailableException
 import java.io.ByteArrayOutputStream
 import java.security.KeyStore
+import java.security.ProviderException
 import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -19,6 +20,12 @@ import javax.crypto.spec.GCMParameterSpec
 // Android key envelope (vault.key, provider 2). The vault master key is wrapped
 // with a non-exportable AES-256-GCM key in Android Keystore. Layout in
 // docs/PHASE1_DESIGN.md Section 5. The core never sees this file.
+//
+// Key modes: with a secure lock screen the key is created with
+// setUnlockedDeviceRequired(true) ("lock-bound"); without one that flag is
+// refused by Keystore, so the key is created without it ("not lock-bound").
+// The mode chosen at creation is recorded in app preferences because Keystore
+// does not report it back. See D-010 in docs/DECISIONS.md.
 class KeystoreKeyProvider(private val context: Context) {
 
     class EnvelopeException(val code: Int) : Exception(NativeBridge.errorName(code))
@@ -31,31 +38,56 @@ class KeystoreKeyProvider(private val context: Context) {
         private const val PROVIDER_ID = 2
         private const val GCM_TAG_BITS = 128
 
+        private const val PREFS = "privatevault_keystore"
+        private const val PREF_MODE = "key_mode"
+        const val MODE_LOCK_BOUND = "lock-bound"
+        const val MODE_NOT_LOCK_BOUND = "not lock-bound"
+        const val MODE_UNKNOWN = "unknown (key predates mode recording)"
+
         const val ERR_ENVELOPE_MALFORMED = 14
         const val ERR_ENVELOPE_UNSUPPORTED = 15
         const val ERR_ENVELOPE_UNWRAP_FAILED = 17
     }
 
     private val keyStore: KeyStore = KeyStore.getInstance(PROVIDER).apply { load(null) }
+    private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    // Returns the existing key or generates one. StrongBox is tried first when
-    // the device reports it; on StrongBoxUnavailableException the key is made
-    // without it. User authentication is not required in Phase 1.
-    fun getOrCreateKey(): SecretKey {
-        (keyStore.getKey(ALIAS, null) as? SecretKey)?.let { return it }
-        val hasStrongBox =
-            context.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
-        if (hasStrongBox) {
-            try {
-                return generate(strongBox = true)
-            } catch (e: StrongBoxUnavailableException) {
-                // Fall through to the regular Keystore.
-            }
-        }
-        return generate(strongBox = false)
+    // True when the device has a PIN, pattern, password, or equivalent.
+    fun deviceIsSecure(): Boolean {
+        val km = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+        return km.isDeviceSecure
     }
 
-    private fun generate(strongBox: Boolean): SecretKey {
+    // Mode recorded when the current key was created.
+    fun keyMode(): String {
+        if (!keyExists()) return "no key"
+        return prefs.getString(PREF_MODE, null) ?: MODE_UNKNOWN
+    }
+
+    // Returns the existing key or generates one. StrongBox is tried first when
+    // the device reports it; on any ProviderException the key is generated
+    // again without StrongBox. User authentication is not required in Phase 1.
+    fun getOrCreateKey(): SecretKey {
+        (keyStore.getKey(ALIAS, null) as? SecretKey)?.let { return it }
+        val lockBound = deviceIsSecure()
+        val hasStrongBox =
+            context.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
+        val key = if (hasStrongBox) {
+            try {
+                generate(strongBox = true, lockBound = lockBound)
+            } catch (e: ProviderException) {
+                generate(strongBox = false, lockBound = lockBound)
+            }
+        } else {
+            generate(strongBox = false, lockBound = lockBound)
+        }
+        prefs.edit()
+            .putString(PREF_MODE, if (lockBound) MODE_LOCK_BOUND else MODE_NOT_LOCK_BOUND)
+            .apply()
+        return key
+    }
+
+    private fun generate(strongBox: Boolean, lockBound: Boolean): SecretKey {
         val builder = KeyGenParameterSpec.Builder(
             ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
         )
@@ -63,7 +95,9 @@ class KeystoreKeyProvider(private val context: Context) {
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setRandomizedEncryptionRequired(true)
-            .setUnlockedDeviceRequired(true)
+        if (lockBound) {
+            builder.setUnlockedDeviceRequired(true)
+        }
         if (strongBox) {
             builder.setIsStrongBoxBacked(true)
         }
@@ -76,6 +110,7 @@ class KeystoreKeyProvider(private val context: Context) {
 
     fun deleteKey() {
         if (keyStore.containsAlias(ALIAS)) keyStore.deleteEntry(ALIAS)
+        prefs.edit().remove(PREF_MODE).apply()
     }
 
     // "STRONGBOX", "TRUSTED_ENVIRONMENT", "SOFTWARE", or "UNKNOWN" plus the
@@ -97,6 +132,9 @@ class KeystoreKeyProvider(private val context: Context) {
             if (info.isInsideSecureHardware) "SECURE_HARDWARE" else "SOFTWARE"
         }
     }
+
+    // One line for the status text and the log: level and mode.
+    fun describe(): String = "Keystore security level ${securityLevel()}, key mode ${keyMode()}"
 
     // Wraps vmk into an envelope. Keystore generates the IV; it is stored as returned.
     fun seal(vmk: ByteArray): ByteArray {

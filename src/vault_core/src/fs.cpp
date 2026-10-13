@@ -18,6 +18,19 @@
 
 namespace pv::fs {
 
+namespace {
+thread_local int g_last_os_error = 0;
+}
+
+int fail(int code) {
+#ifdef _WIN32
+    g_last_os_error = static_cast<int>(GetLastError());
+#else
+    g_last_os_error = errno;
+#endif
+    return code;
+}
+
 std::string join(const std::string& dir, const std::string& name) {
     if (dir.empty()) {
         return name;
@@ -70,8 +83,8 @@ int open_read(const std::string& path, File** out) {
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
         DWORD e = GetLastError();
-        return (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) ? PV_ERR_NOT_FOUND
-                                                                        : PV_ERR_IO;
+        return fail((e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) ? PV_ERR_NOT_FOUND
+                                                                             : PV_ERR_IO);
     }
     *out = new (std::nothrow) File{h};
     if (!*out) {
@@ -90,8 +103,8 @@ int create_new(const std::string& path, File** out) {
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
         DWORD e = GetLastError();
-        return (e == ERROR_FILE_EXISTS || e == ERROR_ALREADY_EXISTS) ? PV_ERR_DEST_EXISTS
-                                                                     : PV_ERR_IO;
+        return fail((e == ERROR_FILE_EXISTS || e == ERROR_ALREADY_EXISTS) ? PV_ERR_DEST_EXISTS
+                                                                          : PV_ERR_IO);
     }
     *out = new (std::nothrow) File{h};
     if (!*out) {
@@ -106,7 +119,7 @@ int read(File* f, uint8_t* buf, size_t cap, size_t* out_n) {
     DWORD want = cap > 0x40000000u ? 0x40000000u : static_cast<DWORD>(cap);
     DWORD got = 0;
     if (!ReadFile(f->h, buf, want, &got, nullptr)) {
-        return PV_ERR_IO;
+        return fail(PV_ERR_IO);
     }
     *out_n = got;
     return PV_OK;
@@ -117,7 +130,7 @@ int write(File* f, const uint8_t* buf, size_t n) {
         DWORD want = n > 0x40000000u ? 0x40000000u : static_cast<DWORD>(n);
         DWORD done = 0;
         if (!WriteFile(f->h, buf, want, &done, nullptr) || done == 0) {
-            return PV_ERR_IO;
+            return fail(PV_ERR_IO);
         }
         buf += done;
         n -= done;
@@ -126,7 +139,7 @@ int write(File* f, const uint8_t* buf, size_t n) {
 }
 
 int flush(File* f) {
-    return FlushFileBuffers(f->h) ? PV_OK : PV_ERR_IO;
+    return FlushFileBuffers(f->h) ? PV_OK : fail(PV_ERR_IO);
 }
 
 void close(File* f) {
@@ -165,8 +178,8 @@ int remove_file(const std::string& path) {
         return PV_OK;
     }
     DWORD e = GetLastError();
-    return (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) ? PV_ERR_NOT_FOUND
-                                                                    : PV_ERR_IO;
+    return fail((e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) ? PV_ERR_NOT_FOUND
+                                                                         : PV_ERR_IO);
 }
 
 int mkdir_if_missing(const std::string& path) {
@@ -180,9 +193,9 @@ int mkdir_if_missing(const std::string& path) {
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         bool is_dir = false;
         dir_exists(path, &is_dir);
-        return is_dir ? PV_OK : PV_ERR_IO;
+        return is_dir ? PV_OK : fail(PV_ERR_IO);
     }
-    return PV_ERR_IO;
+    return fail(PV_ERR_IO);
 }
 
 int rename_no_replace(const std::string& from, const std::string& to) {
@@ -194,8 +207,8 @@ int rename_no_replace(const std::string& from, const std::string& to) {
         return PV_OK;
     }
     DWORD e = GetLastError();
-    return (e == ERROR_ALREADY_EXISTS || e == ERROR_FILE_EXISTS) ? PV_ERR_DEST_EXISTS
-                                                                 : PV_ERR_IO;
+    return fail((e == ERROR_ALREADY_EXISTS || e == ERROR_FILE_EXISTS) ? PV_ERR_DEST_EXISTS
+                                                                      : PV_ERR_IO);
 }
 
 int list_dir(const std::string& dir, std::vector<std::string>& names) {
@@ -210,7 +223,7 @@ int list_dir(const std::string& dir, std::vector<std::string>& names) {
         if (e == ERROR_FILE_NOT_FOUND) {
             return PV_OK;
         }
-        return (e == ERROR_PATH_NOT_FOUND) ? PV_ERR_NOT_FOUND : PV_ERR_IO;
+        return fail((e == ERROR_PATH_NOT_FOUND) ? PV_ERR_NOT_FOUND : PV_ERR_IO);
     }
     do {
         if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) {
@@ -231,7 +244,7 @@ struct File {
 int open_read(const std::string& path, File** out) {
     int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
-        return errno == ENOENT ? PV_ERR_NOT_FOUND : PV_ERR_IO;
+        return fail(errno == ENOENT ? PV_ERR_NOT_FOUND : PV_ERR_IO);
     }
     *out = new (std::nothrow) File{fd};
     if (!*out) {
@@ -244,7 +257,7 @@ int open_read(const std::string& path, File** out) {
 int create_new(const std::string& path, File** out) {
     int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (fd < 0) {
-        return errno == EEXIST ? PV_ERR_DEST_EXISTS : PV_ERR_IO;
+        return fail(errno == EEXIST ? PV_ERR_DEST_EXISTS : PV_ERR_IO);
     }
     *out = new (std::nothrow) File{fd};
     if (!*out) {
@@ -263,7 +276,7 @@ int read(File* f, uint8_t* buf, size_t cap, size_t* out_n) {
             return PV_OK;
         }
         if (errno != EINTR) {
-            return PV_ERR_IO;
+            return fail(PV_ERR_IO);
         }
     }
 }
@@ -275,10 +288,10 @@ int write(File* f, const uint8_t* buf, size_t n) {
             if (errno == EINTR) {
                 continue;
             }
-            return PV_ERR_IO;
+            return fail(PV_ERR_IO);
         }
         if (w == 0) {
-            return PV_ERR_IO;
+            return fail(PV_ERR_IO);
         }
         buf += w;
         n -= static_cast<size_t>(w);
@@ -287,7 +300,7 @@ int write(File* f, const uint8_t* buf, size_t n) {
 }
 
 int flush(File* f) {
-    return ::fsync(f->fd) == 0 ? PV_OK : PV_ERR_IO;
+    return ::fsync(f->fd) == 0 ? PV_OK : fail(PV_ERR_IO);
 }
 
 void close(File* f) {
@@ -313,7 +326,7 @@ int remove_file(const std::string& path) {
     if (::unlink(path.c_str()) == 0) {
         return PV_OK;
     }
-    return errno == ENOENT ? PV_ERR_NOT_FOUND : PV_ERR_IO;
+    return fail(errno == ENOENT ? PV_ERR_NOT_FOUND : PV_ERR_IO);
 }
 
 int mkdir_if_missing(const std::string& path) {
@@ -323,9 +336,9 @@ int mkdir_if_missing(const std::string& path) {
     if (errno == EEXIST) {
         bool is_dir = false;
         dir_exists(path, &is_dir);
-        return is_dir ? PV_OK : PV_ERR_IO;
+        return is_dir ? PV_OK : fail(PV_ERR_IO);
     }
-    return PV_ERR_IO;
+    return fail(PV_ERR_IO);
 }
 
 static std::string parent_dir(const std::string& path) {
@@ -358,7 +371,7 @@ int rename_no_replace(const std::string& from, const std::string& to) {
         return PV_OK;
     }
     if (errno == EEXIST) {
-        return PV_ERR_DEST_EXISTS;
+        return fail(PV_ERR_DEST_EXISTS);
     }
     bool present = false;
     exists(to, &present);
@@ -366,7 +379,7 @@ int rename_no_replace(const std::string& from, const std::string& to) {
         return PV_ERR_DEST_EXISTS;
     }
     if (::rename(from.c_str(), to.c_str()) != 0) {
-        return PV_ERR_IO;
+        return fail(PV_ERR_IO);
     }
     fsync_dir(parent_dir(to));
     return PV_OK;
@@ -375,7 +388,7 @@ int rename_no_replace(const std::string& from, const std::string& to) {
 int list_dir(const std::string& dir, std::vector<std::string>& names) {
     DIR* d = ::opendir(dir.c_str());
     if (!d) {
-        return errno == ENOENT ? PV_ERR_NOT_FOUND : PV_ERR_IO;
+        return fail(errno == ENOENT ? PV_ERR_NOT_FOUND : PV_ERR_IO);
     }
     while (struct dirent* e = ::readdir(d)) {
         if (std::strcmp(e->d_name, ".") == 0 || std::strcmp(e->d_name, "..") == 0) {
@@ -390,3 +403,7 @@ int list_dir(const std::string& dir, std::vector<std::string>& names) {
 #endif
 
 }  // namespace pv::fs
+
+extern "C" int pv_last_os_error(void) {
+    return pv::fs::g_last_os_error;
+}

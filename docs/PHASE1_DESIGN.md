@@ -213,12 +213,26 @@ Written and read by the Kotlin key provider, not by the core.
 | | `wrapped_len` | `wrapped_vmk` | Output of `Cipher.doFinal` in GCM mode: ciphertext plus tag. AAD = every preceding byte of the file (from offset 0 through `wrapped_len`). |
 
 - Keystore key: `KeyGenParameterSpec` with `PURPOSE_ENCRYPT | PURPOSE_DECRYPT`, key size 256,
-  `BLOCK_MODE_GCM`, `ENCRYPTION_PADDING_NONE`, `setRandomizedEncryptionRequired(true)`,
-  `setUnlockedDeviceRequired(true)` (minSdk 28 allows it), no user authentication requirement.
+  `BLOCK_MODE_GCM`, `ENCRYPTION_PADDING_NONE`, `setRandomizedEncryptionRequired(true)`, no
+  user authentication requirement.
+- Two key modes, chosen once at key creation from `KeyguardManager.isDeviceSecure()`:
+  - **lock-bound**: the device has a PIN, pattern, or password, and the key is created with
+    `setUnlockedDeviceRequired(true)`, so it can only be used while the device is unlocked;
+  - **not lock-bound**: the device has no secure lock screen. Keystore refuses
+    `setUnlockedDeviceRequired(true)` in that state (seen on a Xiaomi, Android 13, as a
+    `ProviderException` at key generation), so the key is created without that flag and is
+    usable whenever the device is on. The vault then still protects against copying the files
+    and against other apps, but not against someone holding the phone.
+  The mode is recorded in app preferences at creation (Keystore does not report it back) and
+  shown with the security level. A key keeps its mode if the user later adds or removes a
+  screen lock; existing keys are not migrated in Phase 1, and whether removing a lock
+  invalidates a lock-bound key on real devices is unverified. An in-app lock is a later-phase
+  item. See D-010.
 - `setIsStrongBoxBacked(true)` is tried first when `PackageManager.FEATURE_STRONGBOX_KEYSTORE`
-  is present; on `StrongBoxUnavailableException` the key is generated again without it. The app
-  reports the actual level from `KeyInfo.getSecurityLevel()` (API 31+) or
-  `KeyInfo.isInsideSecureHardware()` (API 28 to 30): software, trusted environment, or StrongBox.
+  is present; on any `ProviderException` (which includes `StrongBoxUnavailableException`) the
+  key is generated again without it. The app reports the actual level from
+  `KeyInfo.getSecurityLevel()` (API 31+) or `KeyInfo.isInsideSecureHardware()` (API 28 to 30):
+  software, trusted environment, or StrongBox.
 - GCM authentication failure (modified envelope, wrong key): `ENVELOPE_UNWRAP_FAILED`.
 - The envelope is written to `vault.key.partial` in `filesDir/vault/` and renamed.
 - Uninstall, Clear Data, and factory reset delete the Keystore key. The envelope then cannot be

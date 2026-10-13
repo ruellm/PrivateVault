@@ -34,6 +34,9 @@ int list_dir(const std::string& dir, std::vector<std::string>& names);
 
 std::string join(const std::string& dir, const std::string& name);
 
+// Records the platform error of a failed call for pv_last_os_error().
+int fail(int code);
+
 }  // namespace pv::fs
 
 #endif

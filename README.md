@@ -135,8 +135,12 @@ adb logcat -d -s PrivateVault:I
 ```
 
 On MIUI phones `adb install` needs "Install via USB" enabled under Developer options
-(MIUI asks for a Mi account) and the on-screen confirmation accepted; otherwise it fails
-with `INSTALL_FAILED_USER_RESTRICTED`.
+(MIUI asks for a Mi account) and the on-screen confirmation accepted for every install;
+otherwise it fails with `INSTALL_FAILED_USER_RESTRICTED`. On the MIUI build tested,
+`adb uninstall` returns `DELETE_FAILED_INTERNAL_ERROR` and `pm clear` is refused, so
+reinstall with `adb install -r` over the old app and expect the existing vault to be reused.
+Without a screen lock the Keystore key is created "not lock-bound" (see
+`docs/PHASE1_DESIGN.md` Section 5); the status text shows the mode.
 
 Android-to-Windows format check (debug build, emulator or device with `run-as`):
 

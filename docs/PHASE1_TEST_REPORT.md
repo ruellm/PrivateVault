@@ -5,10 +5,11 @@ command that was run; nothing is inferred. "Not verified" means exactly that.
 
 ## Status
 
-**Partially complete.** Everything builds and every automated test passes on Windows (T1)
-and on the Android emulator (T2). The physical-device tier (T3) is **not verified**: the
-phone refuses `adb install` at the MIUI level (details below). The same T3 procedure was run
-on the emulator and passed, which exercises the app code but is not a device result.
+**Complete.** Everything builds and every automated test passes on Windows (T1) and on the
+Android emulator (T2). The physical-device tier (T3) passed on the Xiaomi 2201116SG after two
+device-found defects were fixed (Keystore without a screen lock, D-010; tagged pointer
+handle, D-011). The remaining items are the documented limitations of an R&D prototype, not
+open test failures.
 
 ## Environment
 
@@ -96,18 +97,25 @@ Skipped: none. The production preset (`windows-x64`, `PV_TEST_HOOKS=OFF`) regist
 
 ### T2, Android automated (emulator)
 
-`gradlew connectedDebugAndroidTest` on `Pixel_8_API_35` (Android 15): **15 tests, 0 failures,
-0 errors, 0 skipped** (2.0 s on device, 40 s wall clock).
+`gradlew connectedDebugAndroidTest` on `Pixel_8_API_35` (Android 15): **17 tests, 0 failures,
+0 errors, 0 skipped** (2.0 s on device, 13 s wall clock; rerun after the D-010 and D-011
+changes).
 
 | Class | Tests | Result |
 |---|---|---|
 | NativeInitTest | library loads, `pv_init` ok, libsodium at least 1.0.21 | Pass |
-| VaultTest | 1 MB round trip with size arithmetic and inspect; sizes 0, 1, 4095, 4096, 4097, 12388 at chunk 4096; tampered ciphertext (AUTH_FAILED); tampered wrapped DEK (WRONG_VMK); truncation at boundary (TRUNCATED), inside chunk (AUTH_FAILED), inside header (MALFORMED_HEADER); wrong key (WRONG_VMK) then correct key still ok; stale `.partial` removed on open; missing object (NOT_FOUND) | Pass (8) |
-| KeystoreTest | seal and open round trip, two seals differ, security level reported; tampered envelope: magic, version, provider, alias, IV, tag, body, short, long, empty; `Vault.create` then `open` persists through the Keystore envelope, second create refused; `link()` probe logged | Pass (4) |
+| VaultTest | 1 MB round trip with size arithmetic and inspect; sizes 0, 1, 4095, 4096, 4097, 12388 at chunk 4096; tampered ciphertext (AUTH_FAILED); tampered wrapped DEK (WRONG_VMK); truncation at boundary (TRUNCATED), inside chunk (AUTH_FAILED), inside header (MALFORMED_HEADER); wrong key (WRONG_VMK) then correct key still ok; stale `.partial` removed on open; missing object (NOT_FOUND); open reports status and handle separately with step, raw code, and `PV_ERR_UNKNOWN (999)` formatting (D-011) | Pass (9) |
+| KeystoreTest | seal and open round trip, two seals differ, security level and key mode reported; tampered envelope: magic, version, provider, alias, IV, tag, body, short, long, empty; `Vault.create` then `open` persists through the Keystore envelope, second create refused; no-lock-screen path: fresh key is "not lock-bound" and the vault creates and opens (D-010); `link()` probe logged | Pass (5) |
 | GoldenVectorTest | all 8 committed vectors decrypt with the expected ID, length and hash; wrong key fails; export of 3 Android-made vectors to `files/pv_export` with local check | Pass (2) |
 
-Logged on the emulator: `Keystore security level: SOFTWARE`; `link() in filesDir: denied
-errno=13`.
+Logged on the emulator: `Keystore security level SOFTWARE, key mode not lock-bound`;
+`link() in filesDir: denied errno=13`.
+
+Developer T3 finding (Xiaomi, no screen lock): key generation with
+`setUnlockedDeviceRequired(true)` threw `ProviderException`, so the first APK could not
+create a vault. Fixed per D-010 (lock-screen check, mode recorded and shown, retry without
+StrongBox on any `ProviderException`, full exception chain logged). The rebuilt APK was not
+installed on the phone by Claude Code; the developer reruns T3.
 
 ### Android to Windows (Milestone E check)
 
@@ -126,8 +134,51 @@ Hashes equal those of the Windows-made vectors of the same length. **Verified.**
 
 ### T3, device manual or scripted
 
-**Physical device: Not verified.** `adb install` of the debug APK on the Xiaomi 2201116SG
-fails immediately on two attempts:
+**Physical device: Pass (2026-10-13).** Xiaomi 2201116SG (veux), Android 13, MIUI
+V816.0.9.0, arm64-v8a, release-keys, verified boot green, no root, no screen lock set.
+Debug APK installed by the developer (MIUI needs an on-screen tap per install). Steps run
+through the scripted `actions` extra; the first row by Claude Code over adb, the rest by the
+developer.
+
+| Step | Result on device |
+|---|---|
+| Install, open (create) vault, security level | `Keystore security level TRUSTED_ENVIRONMENT, key mode not lock-bound`; `link()` in `filesDir` denied errno 13 |
+| Encrypt 1 MB, encrypt 100 MB | 156 ms and 19 976 ms; objects 1 048 993 and 104 884 945 bytes |
+| Verify both | hashes match (31 990 ms) |
+| `am force-stop`, relaunch, open, verify | `opened existing vault`, 2 objects, both hashes match (verify 11.8 s) |
+| `adb reboot`, relaunch, open, verify | 100 MB hash matches after reboot (verify 25.7 s). The start of that log was pushed out of the logcat buffer by system traffic; verify cannot run on an unopened vault, so the open succeeded |
+| Tamper, truncation, wrong key | PASS (`PV_ERR_AUTH_FAILED`), PASS (`PV_ERR_TRUNCATED`), PASS (`PV_ERR_WRONG_VMK`); objects in vault stayed at 2 |
+| Storage | `files/vault/vault.key` (97 bytes) and the two objects, mode 0600, owner the app uid; no `AndroidRuntime` errors |
+
+Timings are from a debug build with unoptimized native code and are not performance results.
+
+Device notes: `adb uninstall` returns `DELETE_FAILED_INTERNAL_ERROR` and `pm clear` is
+refused (`SecurityException`, shell lacks `CLEAR_APP_USER_DATA`) on this MIUI build; a plain
+`adb install -r` over the old app works after the on-screen tap. Because `pm clear` was
+refused, the envelope written by the first (failed) create attempt was reused and opened
+without error.
+
+Two defects were found only on the device and fixed before the steps above:
+
+1. **Keystore without a screen lock (D-010).** Key generation with
+   `setUnlockedDeviceRequired(true)` threw `ProviderException` on this phone, so create and
+   open failed; the emulator did not reproduce it. Fix: `KeystoreKeyProvider` checks
+   `KeyguardManager.isDeviceSecure()` and sets the flag only with a secure lock screen; the
+   mode ("lock-bound" or "not lock-bound") is recorded and shown with the security level;
+   any `ProviderException` on the StrongBox attempt leads to one retry without StrongBox;
+   action failures log the full exception chain. Emulator test
+   `KeystoreTest.noLockScreenPathCreatesUsableKey`.
+2. **Tagged pointer handle (D-011).** `nativeVaultOpen` returned the native pointer as a
+   `jlong` and used a negative value as the error signal; arm64 heap pointer tagging made a
+   valid handle negative, so Kotlin reported `PV_ERR_UNKNOWN` after an otherwise complete
+   create. Fix: status and handle are returned separately, `errorName` always shows the raw
+   code, the core exposes `pv_last_os_error()`, and `Vault.CoreException` names the step,
+   the raw status, and the platform error. Emulator test
+   `VaultTest.openReportsStatusAndHandleSeparately`; the tagging itself needs an arm64
+   target.
+
+Earlier state, kept for the record: `adb install` of the debug APK initially failed on two
+attempts:
 
 ```
 adb -s 9c4424ba81c6 install -r android\app\build\outputs\apk\debug\app-debug.apk
@@ -151,11 +202,10 @@ adb -s 9c4424ba81c6 shell am start -n com.privatevault.app/.MainActivity --es ac
 adb -s 9c4424ba81c6 logcat -d -s PrivateVault:I
 ```
 
-Expected on this phone: `Keystore security level: TRUSTED_ENVIRONMENT` (no StrongBox
-feature reported), `arm64-v8a` library, no root needed. Timing for the 100 MB sample will be
-printed by the `encrypt_100mb` and `verify` actions.
+That blocker was cleared by the developer enabling USB installs and tapping Install on the
+phone; the results above followed.
 
-**Same procedure on the emulator (not a device result):** all steps passed.
+**Same procedure on the emulator:** all steps passed before the device run.
 
 | Step | Result on emulator |
 |---|---|
@@ -181,8 +231,12 @@ printed by the `encrypt_100mb` and `verify` actions.
 
 ## Android device
 
-Install failed with `INSTALL_FAILED_USER_RESTRICTED` (see T3). No other APK was installed on
-the phone and no setting was changed. The phone stayed connected throughout.
+Installed and run on the Xiaomi 2201116SG (see T3): create, encrypt, verify, persistence
+across force-stop and reboot, tamper, truncation, and wrong-key checks all passed, with the
+Keystore key in the trusted execution environment ("not lock-bound" because the phone has no
+screen lock). Only the debug APK was installed; Claude Code changed no device settings.
+MIUI quirks: USB installs need the developer-option switch and an on-screen tap,
+`adb uninstall` fails with `DELETE_FAILED_INTERNAL_ERROR`, and `pm clear` is refused.
 
 ## Security review notes
 
@@ -239,17 +293,20 @@ No TrueCrypt or VeraCrypt code, no test framework beyond CTest, no networking or
 
 ## Unresolved risks and next actions
 
-- T3 on the physical device needs "Install via USB" enabled on the phone; then run the
-  steps above and add the results (security level, timings) to this report.
-- The working tree is not committed (`git log` shows only the two original commits). A
-  commit message is suggested below.
+- The D-010 and D-011 fixes and this report update are uncommitted; a commit message is
+  suggested below.
+- T3 ran on one phone without a screen lock. The lock-bound key mode has only been exercised
+  on the emulator through the code path, not on a device with a PIN set.
 - Trailing data after a short final chunk and cuts inside a chunk report `AUTH_FAILED`
   (D-007). A length trailer is the candidate fix for a format version 2.
 - The Android rename path has a check-then-rename window (D-008), judged negligible with
   random 128-bit IDs.
 - The Kotlin `ByteArray` copy of the VMK cannot be reliably wiped.
-- The emulator Keystore is software-backed; hardware-backed levels are unconfirmed until T3
-  runs on the device.
+- The emulator Keystore is software-backed; the phone reported `TRUSTED_ENVIRONMENT`. No
+  StrongBox device was available.
+- Without a secure lock screen the Keystore key is usable whenever the device is on
+  ("not lock-bound", D-010); keys keep their creation mode and are not migrated; whether
+  removing a lock invalidates a lock-bound key on real devices is unverified.
 - NDK r29 and AGP 8.8.2 are current choices; AGP 9.x exists and would need a newer Android
   Studio.
 - No independent review of the format or the code has taken place.
@@ -262,35 +319,41 @@ No TrueCrypt or VeraCrypt code, no test framework beyond CTest, no networking or
 | Android debug app builds reproducibly | Pass (`gradlew assembleDebug`, pinned Gradle, AGP, NDK, vcpkg baseline) |
 | Merged manifest has no INTERNET or storage permissions; backup disabled | Pass |
 | T2 tests pass on an emulator or device | Pass (15/15 on emulator) |
-| T3 tests pass if a device is available, otherwise blocker and remaining steps explicit | Not verified (install blocked by MIUI; blocker and steps listed; procedure passed on the emulator) |
+| T3 tests pass if a device is available, otherwise blocker and remaining steps explicit | Pass (Xiaomi 2201116SG: install, create, encrypt 1 MB and 100 MB, verify, force-stop and relaunch, reboot and verify, tamper, truncation, wrong key; Keystore level TRUSTED_ENVIRONMENT) |
 | Encryption and decryption are chunked and authenticated | Pass |
 | Wrong key, tampering, truncation, trailing data fail closed | Pass (with the D-007 code mapping) |
 | Desktop and Android key handling outside the shared core | Pass (`src/desktop_cli`, Kotlin `KeystoreKeyProvider`; core takes VMK bytes only) |
 | No unnecessary plaintext persisted (Android stores none) | Pass (Android: hash sink only; Windows: only the user-requested decrypt output) |
 | Cross-platform format compatibility tested | Pass (committed vectors on both platforms; Android-made vectors decrypted on Windows) |
-| New developer can follow the README | Pass for Windows and emulator (commands in `README.md`); device install needs the MIUI switch |
+| New developer can follow the README | Pass (commands for Windows, emulator, and device in `README.md`, including the MIUI notes) |
 | Report separates demonstrated facts from assumptions | Pass (this document) |
 | Milestone A: clean configure, build, test; libsodium links for Windows and both Android ABIs | Pass |
 | Milestone B: docs understandable alone; checkpoint held | Pass (approved 2026-10-13 with changes, all applied) |
 | Milestone C: all T1 tests pass, skipped tests explained | Pass (none skipped) |
-| Milestone D: `assembleDebug`, manifest checks, T2 on emulator, T3 or explicit blocker | Pass except T3 (Not verified, blocker explicit) |
+| Milestone D: `assembleDebug`, manifest checks, T2 on emulator, T3 or explicit blocker | Pass |
 | Milestone E: vectors on both platforms, Android-to-Windows check, no secrets or build output in the tree, docs updated, this report | Pass |
 
 ## Suggested commit message
 
+For the D-010 and D-011 fixes and this report update (the initial Phase 1 tree was
+committed earlier):
+
 ```
-Phase 1: encrypted storage core, desktop CLI, Android proof of concept
+Fix Android Keystore and JNI handle defects found on device; T3 complete
 
-Portable C++20 vault core with a C ABI over libsodium 1.0.22 (secretstream
-XChaCha20-Poly1305 objects, per-object keys wrapped under a vault master
-key), Windows CLI with an Argon2id password envelope, Android app with a
-Keystore AES-GCM envelope and JNI bridge, CTest and instrumented tests,
-committed golden vectors, and the Phase 1 design, threat model, dependency,
-decision, and test documents.
+Keystore: set setUnlockedDeviceRequired only when the device has a secure
+lock screen, record and show the key mode, retry without StrongBox on any
+ProviderException, log the full exception chain on action failures (D-010).
 
-T1: 11/11 on Windows (Debug and Release). T2: 15/15 on the API 35 emulator.
-T3: not verified; the MIUI device blocks adb install until Install via USB
-is enabled.
+JNI: return the vault open status and handle separately instead of using
+the handle sign, which arm64 pointer tagging made negative; always show
+raw status codes; add pv_last_os_error() and step names to core failures
+(D-011).
+
+Tests: emulator cases for the no-lock path and the open status/handle
+path, pv_last_os_error check on Windows. T1 11/11, T2 17/17, T3 passed on
+a Xiaomi 2201116SG (Android 13). Test report, progress log, design, threat
+model, decisions, and README updated.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 ```

@@ -70,6 +70,7 @@ class MainActivity : Activity() {
                 "pv_init ${NativeBridge.errorName(init)}"
         )
         say("vault present: ${Vault.exists(filesDir)}; Keystore key present: ${provider.keyExists()}")
+        say("secure lock screen: ${provider.deviceIsSecure()}; key mode: ${provider.keyMode()}")
         say("Uninstall, Clear Data, or a factory reset destroys the Keystore key and the vault.")
         handleScriptedActions(intent)
     }
@@ -123,13 +124,27 @@ class MainActivity : Activity() {
                 action()
                 say("[$label] done in ${(System.nanoTime() - t0) / 1_000_000} ms")
             } catch (e: Vault.CoreException) {
-                say("[$label] FAIL: ${NativeBridge.errorName(e.code)}")
+                say("[$label] FAIL: ${e.message}")
             } catch (e: KeystoreKeyProvider.EnvelopeException) {
-                say("[$label] FAIL: ${NativeBridge.errorName(e.code)}")
+                say("[$label] FAIL: envelope: ${NativeBridge.errorName(e.code)}")
             } catch (e: Exception) {
-                say("[$label] FAIL: ${e.javaClass.simpleName}")
+                say("[$label] FAIL: ${describeChain(e)}")
             }
         }
+    }
+
+    // Class and message of the exception and of each cause. Messages from the
+    // platform name the failing API; they carry no key material.
+    private fun describeChain(e: Throwable): String {
+        val parts = ArrayList<String>()
+        var t: Throwable? = e
+        var depth = 0
+        while (t != null && depth < 8) {
+            parts.add("${t.javaClass.name}: ${t.message ?: "(no message)"}")
+            t = t.cause
+            depth++
+        }
+        return parts.joinToString(" <- ")
     }
 
     private fun requireVault(): Vault = vault ?: throw IllegalStateException("vault not open")
@@ -141,7 +156,7 @@ class MainActivity : Activity() {
         } else {
             Vault.create(filesDir, provider).also { say("created new vault") }
         }
-        say("Keystore security level: ${provider.securityLevel()}")
+        say(provider.describe())
         say("objects in vault: ${requireVault().listObjectIds().size}")
     }
 
@@ -219,7 +234,8 @@ class MainActivity : Activity() {
 
     private fun securityLevel() {
         provider.getOrCreateKey()
-        say("Keystore security level: ${provider.securityLevel()}")
+        say("secure lock screen: ${provider.deviceIsSecure()}")
+        say(provider.describe())
         say("link() in filesDir: ${NativeBridge.nativeProbeLink(filesDir.absolutePath).let { if (it == 0) "allowed" else "denied (errno $it)" }}")
     }
 

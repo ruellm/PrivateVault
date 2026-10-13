@@ -7,7 +7,17 @@ import java.io.File
 // the key bytes to the core, which keeps them in guarded memory.
 class Vault private constructor(val dir: File, private var handle: Long) {
 
-    class CoreException(val code: Int) : Exception(NativeBridge.errorName(code))
+    // A failed core call: the step that failed, the raw status, and the
+    // platform error when the status came from a file call.
+    class CoreException(val code: Int, val step: String, val osError: Int = 0) :
+        Exception(describe(code, step, osError)) {
+        companion object {
+            fun describe(code: Int, step: String, osError: Int): String {
+                val base = "$step: ${NativeBridge.errorName(code)}"
+                return if (osError != 0) "$base os_error=$osError" else base
+            }
+        }
+    }
 
     companion object {
         const val DIR_NAME = "vault"
@@ -21,13 +31,16 @@ class Vault private constructor(val dir: File, private var handle: Long) {
         fun create(filesDir: File, provider: KeystoreKeyProvider): Vault {
             val dir = dirFor(filesDir)
             val keyFile = File(dir, KEY_FILE)
-            if (keyFile.exists()) throw CoreException(NativeBridge.ERR_DEST_EXISTS)
-            check(NativeBridge.nativeVaultCreate(dir.absolutePath))
+            if (keyFile.exists()) throw CoreException(NativeBridge.ERR_DEST_EXISTS, "envelope exists")
+            check(NativeBridge.nativeVaultCreate(dir.absolutePath), "mkdir vault and objects")
             val vmk = ByteArray(NativeBridge.VMK_BYTES)
             try {
-                check(NativeBridge.nativeVmkGenerate(vmk))
+                check(NativeBridge.nativeVmkGenerate(vmk), "generate vmk")
                 val envelope = provider.seal(vmk)
-                check(NativeBridge.nativeFileWriteAtomic(keyFile.absolutePath, envelope))
+                check(
+                    NativeBridge.nativeFileWriteAtomic(keyFile.absolutePath, envelope),
+                    "envelope write and rename"
+                )
                 return openWithKey(dir, vmk)
             } finally {
                 vmk.fill(0)
@@ -37,7 +50,9 @@ class Vault private constructor(val dir: File, private var handle: Long) {
         fun open(filesDir: File, provider: KeystoreKeyProvider): Vault {
             val dir = dirFor(filesDir)
             val envelope = NativeBridge.nativeFileReadAll(File(dir, KEY_FILE).absolutePath)
-                ?: throw CoreException(NativeBridge.ERR_NOT_FOUND)
+                ?: throw CoreException(
+                    NativeBridge.ERR_NOT_FOUND, "envelope read", NativeBridge.nativeLastOsError()
+                )
             val vmk = provider.open(envelope)
             try {
                 return openWithKey(dir, vmk)
@@ -48,13 +63,17 @@ class Vault private constructor(val dir: File, private var handle: Long) {
 
         // Opens with raw key bytes. The caller wipes its copy afterwards.
         fun openWithKey(dir: File, vmk: ByteArray): Vault {
-            val h = NativeBridge.nativeVaultOpen(dir.absolutePath, vmk)
-            if (h <= 0) throw CoreException((-h).toInt())
-            return Vault(dir, h)
+            val handleOut = LongArray(1)
+            check(NativeBridge.nativeVaultOpen(dir.absolutePath, vmk, handleOut), "vault open")
+            if (handleOut[0] == 0L) throw CoreException(NativeBridge.ERR_INTERNAL, "vault open: null handle")
+            return Vault(dir, handleOut[0])
         }
 
-        private fun check(rc: Int) {
-            if (rc != NativeBridge.OK) throw CoreException(rc)
+        private fun check(rc: Int, step: String) {
+            if (rc != NativeBridge.OK) {
+                val os = if (NativeBridge.isFileStatus(rc)) NativeBridge.nativeLastOsError() else 0
+                throw CoreException(rc, step, os)
+            }
         }
     }
 
@@ -69,7 +88,7 @@ class Vault private constructor(val dir: File, private var handle: Long) {
 
     fun encryptSample(seed: ByteArray, length: Long, chunkSize: Int = 0): ByteArray {
         val id = ByteArray(NativeBridge.OBJECT_ID_BYTES)
-        check(NativeBridge.nativeEncryptSample(handle, seed, length, chunkSize, id))
+        check(NativeBridge.nativeEncryptSample(handle, seed, length, chunkSize, id), "encrypt")
         return id
     }
 

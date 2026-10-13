@@ -4,13 +4,16 @@ Working log for Claude Code sessions. Updated after each milestone. Newest state
 
 ## Current state (2026-10-13)
 
-Phase 1 partially complete. Milestones A, B, C, and E done; Milestone D done except T3 on
-the physical device, which is Not verified (MIUI blocks `adb install`; the same scripted
-procedure passed on the emulator). Full results in `docs/PHASE1_TEST_REPORT.md`. The
-working tree is uncommitted; a commit message is suggested at the end of the report.
+Phase 1 complete. Milestones A to E done. T1 11/11 (Windows Debug and Release), T2 17/17
+(emulator), T3 passed on the Xiaomi 2201116SG (Android 13, no screen lock) after two
+device-found defects were fixed: Keystore without a screen lock (D-010) and the tagged
+pointer vault handle (D-011). The developer ran the force-stop, reboot, tamper, truncation,
+and wrong-key steps; results are in `docs/PHASE1_TEST_REPORT.md`. The initial tree is
+committed; the D-010 and D-011 changes plus the report update are uncommitted, with a
+commit message suggested at the end of the report.
 
-To resume: enable "Install via USB" on the phone, run the T3 commands from `README.md`, and
-add the device results (Keystore security level, timings) to the test report.
+Open for later phases: lock-bound key mode untested on a device with a PIN; no StrongBox
+device; a length trailer for a format version 2 (D-007); in-app lock; independent review.
 
 ## Resumed (2026-10-13)
 
@@ -242,6 +245,82 @@ canceled by user` (MIUI 14, V816.0.9.0.TKCMIXM) on two attempts; see the T3 sect
   Gradle wrapper jar. Fixture objects total 42 KB.
 - README, design (Section 9 now points at `pv.h`), decisions (D-007 to D-009), and this log
   updated; `docs/PHASE1_TEST_REPORT.md` written.
+
+## Keystore lock-screen fix (2026-10-13, after the developer ran T3)
+
+Developer finding on the Xiaomi (Android 13, MIUI, no screen lock): key generation with
+`setUnlockedDeviceRequired(true)` throws `ProviderException`, so create/open failed. Change
+applied per the developer's decision (D-010): `KeystoreKeyProvider` checks
+`KeyguardManager.isDeviceSecure()`, keeps the flag only with a secure lock screen, retries
+without StrongBox on any `ProviderException`, records and shows the key mode with the
+security level; `MainActivity` logs the full exception chain (class and message per cause)
+on action failures; `docs/THREAT_MODEL.md` and `docs/PHASE1_DESIGN.md` Section 5 updated;
+new emulator test `KeystoreTest.noLockScreenPathCreatesUsableKey`.
+
+```
+cd android; gradlew.bat assembleDebug assembleDebugAndroidTest       # BUILD SUCCESSFUL
+$env:ANDROID_SERIAL="emulator-5554"; gradlew.bat connectedDebugAndroidTest   # 16 tests, 0 failures (Pixel_8_API_35, Android 15)
+ctest --preset windows-x64-tests-release                              # 11/11 passed
+```
+
+Logcat from the new test: `Keystore security level SOFTWARE, key mode not lock-bound`.
+Not installed on the phone; the developer runs T3.
+
+## Tagged-pointer fix and first device run (2026-10-13)
+
+Developer T3 finding after the Keystore fix: `[open]` and `[Create or open vault]` failed
+with `PV_ERR_UNKNOWN`; the emulator did not reproduce it. Diagnosis on the phone with
+`run-as ls`: `files/vault/objects` and a 97-byte `vault.key` existed, so every create step
+up to the final `openWithKey` had succeeded. Cause: `nativeVaultOpen` returned the native
+pointer as a `jlong` and used a negative value as the error signal; on arm64 Android the heap
+allocator tags the top byte of pointers, so the handle was negative and Kotlin turned it
+into a code outside the table (D-011).
+
+Changes: `nativeVaultOpen(dir, vmk, handleOut)` returns the status and writes the handle
+separately; `NativeBridge.errorName` appends the raw code; the core gained
+`pv_last_os_error()` (per-thread errno or `GetLastError` of the last failed file call,
+recorded in `fs.cpp`); `Vault.CoreException` carries step name, raw status, and platform
+error for every create and open step (`envelope exists`, `mkdir vault and objects`,
+`generate vmk`, `envelope write and rename`, `envelope read`, `vault open`); the Kotlin
+constants mirror all 21 codes in `pv.h`; new tests `VaultTest.openReportsStatusAndHandleSeparately`
+(emulator) and an `pv_last_os_error` check in `test_vault` (Windows). The tagging itself
+cannot be reproduced on the x86_64 emulator.
+
+```
+cd android; gradlew.bat assembleDebug assembleDebugAndroidTest       # BUILD SUCCESSFUL
+$env:ANDROID_SERIAL="emulator-5554"; gradlew.bat connectedDebugAndroidTest   # 17 tests, 0 failures
+ctest --preset windows-x64-tests-release                              # 11/11 passed
+adb -s 9c4424ba81c6 install -r app-debug.apk                          # Success (developer tapped Install)
+adb -s 9c4424ba81c6 shell pm clear com.privatevault.app               # refused: SecurityException, shell lacks CLEAR_APP_USER_DATA (MIUI)
+adb -s 9c4424ba81c6 shell am start -n com.privatevault.app/.MainActivity --es actions open,security_level,encrypt_1mb,encrypt_100mb,verify
+```
+
+Device log (Xiaomi 2201116SG, Android 13):
+
+```
+core 0.1.0, libsodium 1.0.22, pv_init PV_OK (0)
+vault present: true; Keystore key present: true
+secure lock screen: false; key mode: not lock-bound
+opened existing vault
+Keystore security level TRUSTED_ENVIRONMENT, key mode not lock-bound
+objects in vault: 0
+[open] done in 71 ms
+link() in filesDir: denied (errno 13)
+[security_level] done in 14 ms
+encrypted 1048576 bytes -> 2f2092770182c6d9f66e65596fab285e
+[encrypt_1mb] done in 156 ms
+encrypted 104857600 bytes -> 3df5eac216848d50b7951de9b0a025c6
+[encrypt_100mb] done in 19976 ms
+2f2092770182c6d9f66e65596fab285e: 1048576 bytes, hash matches
+3df5eac216848d50b7951de9b0a025c6: 104857600 bytes, hash matches
+[verify] done in 31990 ms
+[scripted] all actions finished
+```
+
+Because `pm clear` was refused, the vault envelope written by the earlier failed attempt
+(13:19) was reused; it opened without error. Storage after the run: `files/vault/vault.key`
+(97 bytes) and two objects of 1 048 993 and 104 884 945 bytes, mode 0600. No
+`AndroidRuntime` errors. The force-stop, reboot, and tamper steps are left to the developer.
 
 ## T3 on the physical device (2026-10-13)
 

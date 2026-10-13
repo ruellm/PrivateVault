@@ -57,6 +57,14 @@ prototype has been audited or that it is suitable for real private media.
   same effect. There is no recovery path in Phase 1. Migration between devices is a future
   design task.
 - **Coercion, shared passwords, physical access to an unlocked device.** Not addressed.
+- **Android without a secure lock screen.** Keystore refuses `setUnlockedDeviceRequired(true)`
+  when no PIN, pattern, or password is set, so the app then creates the key without that flag
+  ("not lock-bound" mode, `docs/PHASE1_DESIGN.md` Section 5, D-010). Such a key is usable
+  whenever the device is on: the vault still protects against copying the files and against
+  other apps, but not against someone holding the phone. An in-app lock is a later-phase item.
+  A key keeps the mode it was created with if the user later adds or removes a screen lock;
+  existing keys are not migrated in Phase 1, and whether removing a lock invalidates a
+  lock-bound key on real devices is unverified.
 - **Side channels.** Timing or power analysis of libsodium primitives is outside the prototype's
   scope; libsodium's own design choices apply.
 - **Audit.** Nothing here has been independently reviewed.

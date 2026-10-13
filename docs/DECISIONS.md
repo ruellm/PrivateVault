@@ -115,3 +115,49 @@ Alternatives: driving the buttons with `adb shell input tap` (coordinates differ
 or a UI automation dependency (adds a library the brief does not want). The extra prints only
 object IDs, byte counts, status names, and hashes of synthetic data; no key or sample bytes.
 It is a proof-of-concept convenience and would not ship in a product build.
+
+## D-010 Keystore key mode depends on the lock screen (2026-10-13)
+
+Found during T3 on the Xiaomi 2201116SG (Android 13, MIUI, no screen lock set): key
+generation with `setUnlockedDeviceRequired(true)` throws `ProviderException`, so create and
+open of the vault failed. The emulator, also without a lock screen, did not reproduce it.
+
+Choice, per the developer: `KeystoreKeyProvider` checks `KeyguardManager.isDeviceSecure()`
+before generating. With a secure lock screen the key keeps `setUnlockedDeviceRequired(true)`
+("lock-bound"); without one the flag is omitted ("not lock-bound"). AES-256-GCM, randomized
+encryption, and the StrongBox attempt are unchanged, and any `ProviderException` on the
+StrongBox attempt leads to one retry without StrongBox. The mode is recorded in app
+preferences at creation, because Keystore does not report the flag back, and is shown and
+logged with the security level. Action failures log the class and message of every cause.
+
+Consequences: without a lock screen the key is usable whenever the device is on, so the vault
+protects the files against copying and other apps but not against someone holding the phone;
+an in-app lock is a later-phase item. A key keeps its creation mode if the user later adds or
+removes a lock; keys are not migrated in Phase 1, and whether removing a lock invalidates a
+lock-bound key on real devices is unverified. The emulator test
+`KeystoreTest.noLockScreenPathCreatesUsableKey` covers the not-lock-bound path.
+
+Alternatives: refusing to create a vault without a lock screen (rejected for the prototype,
+which must run on the test phone as it is), or always omitting the flag (rejected because it
+gives up a platform protection where it is available).
+
+## D-011 Vault handles cross JNI as opaque values with a separate status (2026-10-13)
+
+Found during T3 on the Xiaomi 2201116SG (arm64, Android 13): `Vault.create` left a
+complete `files/vault/` (objects directory and a 97-byte `vault.key`) and then failed at the
+final open with `PV_ERR_UNKNOWN`. The JNI function returned the native `pv_vault*` as a
+`jlong` and used a negative value to signal an error. On arm64 Android the heap allocator
+tags the top byte of pointers (top-byte-ignore), so a valid handle can be negative; the
+Kotlin side negated it and got a code outside the table. The x86_64 emulator has no pointer
+tagging and never showed it.
+
+Choice: `nativeVaultOpen` returns the status and writes the handle into a `LongArray`; the
+handle is never compared as a number. `NativeBridge.errorName` always appends the raw value,
+so an unexpected code is visible. The core gained `pv_last_os_error()` (per-thread errno or
+`GetLastError` of the last failed file call), and `Vault.CoreException` carries the step
+name, the raw status, and that platform error. The Kotlin constants mirror every code in
+`pv.h`. Not MIUI-specific: any arm64 device with heap tagging enabled would show it.
+
+Regression test: `VaultTest.openReportsStatusAndHandleSeparately` checks the status and
+handle paths and the raw-code formatting. The tagging itself cannot be reproduced on the
+x86_64 emulator; only an arm64 target shows it.

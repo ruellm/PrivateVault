@@ -82,6 +82,12 @@ const char* pv_version_string(void);
 const char* pv_sodium_version_string(void);
 const char* pv_error_name(int code);
 
+// Platform error value (errno, or GetLastError on Windows) recorded by the
+// most recent failed file operation on the calling thread. 0 if none. Read it
+// right after a call that returned PV_ERR_IO, PV_ERR_NOT_FOUND, or
+// PV_ERR_DEST_EXISTS to see why the platform refused.
+int pv_last_os_error(void);
+
 // Fills out with PV_VMK_BYTES random bytes. out_len must equal PV_VMK_BYTES.
 int pv_vmk_generate(uint8_t* out, size_t out_len);
 

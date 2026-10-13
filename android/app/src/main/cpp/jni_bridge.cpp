@@ -139,21 +139,32 @@ Java_com_privatevault_app_NativeBridge_nativeVaultCreate(JNIEnv* env, jclass, js
     return pv_vault_create(d.c_str());
 }
 
-// Returns a handle greater than zero, or the negated status code.
-JNIEXPORT jlong JNICALL
+// Returns the status; on PV_OK handle_out[0] holds the vault handle. The
+// handle is the native pointer as a 64-bit value and has no meaningful sign:
+// on arm64 Android the heap allocator tags the top byte of pointers, so a
+// handle can look negative. Never interpret it as a number.
+JNIEXPORT jint JNICALL
 Java_com_privatevault_app_NativeBridge_nativeVaultOpen(JNIEnv* env, jclass, jstring dir,
-                                                       jbyteArray vmk) {
+                                                       jbyteArray vmk, jlongArray handle_out) {
     std::string d = to_utf8(env, dir);
     KeyCopy k;
-    if (!copy_bytes(env, vmk, PV_VMK_BYTES, k.bytes)) {
-        return -PV_ERR_INVALID_ARGUMENT;
+    if (!copy_bytes(env, vmk, PV_VMK_BYTES, k.bytes) || !handle_out ||
+        env->GetArrayLength(handle_out) < 1) {
+        return PV_ERR_INVALID_ARGUMENT;
     }
     pv_vault* v = nullptr;
     int rc = pv_vault_open(d.c_str(), k.bytes.data(), k.bytes.size(), &v);
     if (rc != PV_OK) {
-        return -rc;
+        return rc;
     }
-    return static_cast<jlong>(reinterpret_cast<intptr_t>(v));
+    jlong h = static_cast<jlong>(reinterpret_cast<intptr_t>(v));
+    env->SetLongArrayRegion(handle_out, 0, 1, &h);
+    return PV_OK;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeLastOsError(JNIEnv*, jclass) {
+    return pv_last_os_error();
 }
 
 JNIEXPORT void JNICALL

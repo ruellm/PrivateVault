@@ -32,7 +32,7 @@ class KeystoreTest {
         assertFalse(env.contentEquals(env2))
         assertTrue(vmk.contentEquals(provider.open(env2)))
         val level = provider.securityLevel()
-        Log.i("PrivateVaultTest", "Keystore security level: $level")
+        Log.i("PrivateVaultTest", provider.describe())
         assertTrue(level in listOf("STRONGBOX", "TRUSTED_ENVIRONMENT", "SOFTWARE", "SECURE_HARDWARE", "UNKNOWN_SECURE"))
     }
 
@@ -83,6 +83,29 @@ class KeystoreTest {
         val (rc, result) = opened.decryptVerify(id)
         assertEquals(NativeBridge.OK, rc)
         assertEquals(50_000L, result!!.length)
+        opened.close()
+        files.deleteRecursively()
+    }
+
+    // The emulator has no secure lock screen, so a freshly generated key must
+    // take the not-lock-bound path and the vault must still create and open.
+    @Test
+    fun noLockScreenPathCreatesUsableKey() {
+        assertFalse("test expects an emulator without a screen lock", provider.deviceIsSecure())
+        provider.deleteKey()
+        assertEquals("no key", provider.keyMode())
+        provider.getOrCreateKey()
+        assertEquals(KeystoreKeyProvider.MODE_NOT_LOCK_BOUND, provider.keyMode())
+        Log.i("PrivateVaultTest", provider.describe())
+
+        val files = File(context.filesDir, "nolock_test")
+        files.deleteRecursively()
+        files.mkdirs()
+        val created = Vault.create(files, provider)
+        val id = created.encryptSample(TestKeys.SEED, 10_000L)
+        created.close()
+        val opened = Vault.open(files, provider)
+        assertEquals(NativeBridge.OK, opened.decryptVerify(id).first)
         opened.close()
         files.deleteRecursively()
     }

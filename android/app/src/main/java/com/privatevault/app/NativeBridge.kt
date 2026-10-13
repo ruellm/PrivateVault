@@ -1,14 +1,29 @@
 package com.privatevault.app
 
 // Kotlin side of the JNI bridge. Every call goes to android/app/src/main/cpp/jni_bridge.cpp
-// and from there to the core C ABI. Status codes are the PV_* codes from pv/pv.h.
+// and from there to the core C ABI. Status codes are the PV_* codes from pv/pv.h; the
+// constants below mirror that header one to one.
 object NativeBridge {
     const val OK = 0
+    const val ERR_INIT = 1
+    const val ERR_INVALID_ARGUMENT = 2
+    const val ERR_IO = 3
     const val ERR_DEST_EXISTS = 4
+    const val ERR_MALFORMED_HEADER = 5
+    const val ERR_UNSUPPORTED_VERSION = 6
+    const val ERR_UNSUPPORTED_SUITE = 7
+    const val ERR_CHUNK_SIZE_OUT_OF_RANGE = 8
     const val ERR_WRONG_VMK = 9
     const val ERR_AUTH_FAILED = 10
     const val ERR_TRUNCATED = 11
     const val ERR_TRAILING_DATA = 12
+    const val ERR_MALFORMED_CHUNK = 13
+    const val ERR_ENVELOPE_MALFORMED = 14
+    const val ERR_ENVELOPE_UNSUPPORTED = 15
+    const val ERR_ENVELOPE_KDF_PARAMS = 16
+    const val ERR_ENVELOPE_UNWRAP_FAILED = 17
+    const val ERR_OUT_OF_MEMORY = 18
+    const val ERR_INTERNAL = 19
     const val ERR_NOT_FOUND = 20
 
     const val VMK_BYTES = 32
@@ -24,11 +39,14 @@ object NativeBridge {
     external fun nativeVersion(): String
     external fun nativeSodiumVersion(): String
     external fun nativeErrorName(code: Int): String
+    // errno (or GetLastError) of the last failed file call on this thread, 0 if none.
+    external fun nativeLastOsError(): Int
 
     external fun nativeVmkGenerate(out: ByteArray): Int
     external fun nativeVaultCreate(dir: String): Int
-    // Returns a handle greater than zero, or the negated status code.
-    external fun nativeVaultOpen(dir: String, vmk: ByteArray): Long
+    // Returns a status; on OK handleOut[0] is the vault handle. The handle is an opaque
+    // 64-bit value whose sign means nothing (tagged pointers on arm64).
+    external fun nativeVaultOpen(dir: String, vmk: ByteArray, handleOut: LongArray): Int
     external fun nativeVaultClose(handle: Long)
 
     external fun nativeEncryptSample(
@@ -53,7 +71,12 @@ object NativeBridge {
     external fun nativeFileDelete(path: String): Int
     external fun nativeProbeLink(dir: String): Int
 
-    fun errorName(code: Int): String = nativeErrorName(code)
+    // Name plus the raw value, so an unexpected code is never hidden.
+    fun errorName(code: Int): String = "${nativeErrorName(code)} ($code)"
+
+    // Status codes for which the platform error is informative.
+    fun isFileStatus(code: Int): Boolean =
+        code == ERR_IO || code == ERR_NOT_FOUND || code == ERR_DEST_EXISTS
 
     fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
 

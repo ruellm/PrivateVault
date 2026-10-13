@@ -135,4 +135,33 @@ class VaultTest {
     fun missingObjectIsNotFound() {
         assertEquals(NativeBridge.ERR_NOT_FOUND, vault.decryptVerify(ByteArray(16)).first)
     }
+
+    // The open call reports status and handle separately. A failure must carry
+    // the step, the raw code, and the platform error; a success must give a
+    // nonzero handle whose sign is not inspected (tagged pointers on arm64 make
+    // handles look negative; the x86_64 emulator cannot reproduce that).
+    @Test
+    fun openReportsStatusAndHandleSeparately() {
+        val missing = File(context.filesDir, "no_such_vault")
+        missing.deleteRecursively()
+        val handleOut = LongArray(1)
+        assertEquals(
+            NativeBridge.ERR_NOT_FOUND,
+            NativeBridge.nativeVaultOpen(missing.absolutePath, TestKeys.VMK, handleOut)
+        )
+        assertEquals(0L, handleOut[0])
+        try {
+            Vault.openWithKey(missing, TestKeys.VMK)
+            org.junit.Assert.fail("expected CoreException")
+        } catch (e: Vault.CoreException) {
+            assertEquals(NativeBridge.ERR_NOT_FOUND, e.code)
+            assertEquals("vault open", e.step)
+            assertTrue(e.message!!.contains("PV_ERR_NOT_FOUND (20)"))
+        }
+        assertEquals(NativeBridge.OK, NativeBridge.nativeVaultOpen(dir.absolutePath, TestKeys.VMK, handleOut))
+        assertTrue(handleOut[0] != 0L)
+        NativeBridge.nativeVaultClose(handleOut[0])
+        // Unknown codes are never hidden behind the name alone.
+        assertEquals("PV_ERR_UNKNOWN (999)", NativeBridge.errorName(999))
+    }
 }
