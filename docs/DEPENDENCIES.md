@@ -1,0 +1,74 @@
+# Dependencies
+
+Every third-party component the Phase 1 build uses, with version, source, license, and how
+the download is verified. Dates are when the facts were checked. Nothing here is fetched as
+"latest" at build time; every item is pinned.
+
+## libsodium 1.0.22
+
+| | |
+|---|---|
+| Role | All cryptography: secretstream XChaCha20-Poly1305, XChaCha20-Poly1305-IETF AEAD, Argon2id, BLAKE2b, random bytes, guarded memory |
+| Version | 1.0.22, tag `1.0.22-RELEASE`, published 2026-04-09 (GitHub releases API, checked 2026-10-12) |
+| License | ISC (file `LICENSE` in the source tree, copyright 2013-2026 Frank Denis) |
+| Source | https://github.com/jedisct1/libsodium, archive of tag `1.0.22-RELEASE` |
+| Obtained through | vcpkg port `libsodium` 1.0.22#1 at the baseline below |
+| Verification | vcpkg pins the SHA512 of the GitHub archive in `ports/libsodium/portfile.cmake`: `f8e11ad193037b7b885a40b832da331105f4e5943b74c0297fe07e02a313786016c777aebb094ad1fcf16398e54af545c2d55404c28b371eae5922d1e164ba00`. vcpkg refuses the download if the hash differs. |
+| Upstream signature | Release tarballs are signed with minisign. Public key from https://doc.libsodium.org/installation (2026-10-12): `RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3`. The `.minisig` for `libsodium-1.0.22.tar.gz` (fetched 2026-10-12) carries trusted comment `timestamp:1775774745 file:libsodium-1.0.22.tar.gz hashed`. The project builds from the vcpkg-pinned GitHub archive, not the tarball, so the minisign signature is recorded here for reference and was not executed against the build input. |
+| Library version | `SODIUM_LIBRARY_VERSION_MAJOR` 26, `MINOR` 4 |
+| Build on Windows | vcpkg triplet `x64-windows-static`: MSBuild project `builds/msvc/vs2022/libsodium/libsodium.vcxproj`, static library, static CRT (`/MT`). `SODIUM_STATIC` is defined for consumers. |
+| Build on Android | vcpkg triplets `arm64-android` and `x64-android`: autotools build driven by vcpkg's bundled msys2, NDK from `ANDROID_NDK_HOME`, static library. |
+
+APIs used and the documentation pages checked on 2026-10-12:
+
+- `crypto_secretstream_xchacha20poly1305_*`: https://doc.libsodium.org/secret-key_cryptography/secretstream
+- `crypto_aead_xchacha20poly1305_ietf_*`: https://doc.libsodium.org/secret-key_cryptography/aead/chacha20-poly1305/xchacha20-poly1305_construction
+- `crypto_pwhash` (Argon2id): https://doc.libsodium.org/password_hashing/default_phf
+- `crypto_generichash` (BLAKE2b), `randombytes_buf`, `sodium_malloc`, `sodium_memzero`,
+  `sodium_init`.
+- `crypto_stream_chacha20_ietf_xor_ic` for the deterministic test-data source
+  (`docs/PHASE1_DESIGN.md` Section 13): https://doc.libsodium.org/advanced/stream_ciphers/chacha20
+
+## vcpkg
+
+| | |
+|---|---|
+| Role | Builds and pins libsodium for Windows and Android |
+| Registry | https://github.com/microsoft/vcpkg, tag `2026.07.29`, commit `9e593bb18ea69cc5095e012465dcd675a822ed0d`, cloned to `D:\tools\vcpkg` |
+| Tool | vcpkg 2026-07-27 (`vcpkg.exe` downloaded by `bootstrap-vcpkg.bat` from the microsoft/vcpkg-tool release and signature-checked by the bootstrap script) |
+| License | MIT |
+| Pinning | `vcpkg.json` sets `builtin-baseline` to the commit above and overrides `libsodium` to `1.0.22#1` so a baseline bump cannot silently change the version |
+| Helper tools vcpkg downloaded on first use | PowerShell 7.6.3, 7-Zip 26.02, msys2 packages (bash, make, autoconf, automake, libtool, m4, perl, pkgconf). All stored under `D:\tools\vcpkg\downloads` with hashes pinned in vcpkg's `scripts/vcpkg-tools.json` and `vcpkg_acquire_msys.cmake`. Only needed to build libsodium, not to use it. |
+| Caches | Binary cache `D:\tools\vcpkg-cache` (set `VCPKG_DEFAULT_BINARY_CACHE`). Buildtrees and downloads under `D:\tools\vcpkg`. |
+
+## Build tools (not redistributed, recorded for reproduction)
+
+| Tool | Version found on the development machine (2026-10-12) |
+|---|---|
+| Windows | 11 Home 10.0.26200 |
+| Visual Studio | Community 2026 18.10.3, MSVC toolset 14.51.36231 (compiler 19.51.36260), Windows SDK 10.0.26100.0 |
+| CMake | 4.4.4 (Kitware installer on PATH); Android SDK CMake 4.1.2 for the Gradle build |
+| Ninja | bundled with Android SDK CMake 4.1.2 (`cmake/4.1.2/bin/ninja.exe`), used by the Android presets |
+| Android SDK | platforms android-35, build-tools 37.0.0 and 35.0.0 (the latter installed by AGP 8.8.2 on the first build, 2026-10-13), platform-tools 37.0.1, cmdline-tools 23.0.0, emulator 37.2.12, system image android-35 google_apis_playstore x86_64 rev 9 |
+| Android NDK | 29.0.14206865 (r29), clang 21.0.0 based on r563880c, platforms 21 to 35. See `docs/DECISIONS.md` D-003. |
+| JDK | OpenJDK 21.0.4 (Android Studio JBR) |
+| Android Studio | AI-242.23726.103 (Ladybug Feature Drop 2024.2.2) |
+
+## Gradle and Android Gradle Plugin
+
+| | |
+|---|---|
+| Gradle | 8.10.2, distribution `gradle-8.10.2-bin.zip` from https://services.gradle.org/distributions/, SHA-256 `31c55713e40233a8303827ceb42ca48a47267a0ad4bab9177123121e71524c26` (from `gradle-8.10.2-bin.zip.sha256`, 2026-10-12) pinned in `gradle-wrapper.properties` as `distributionSha256Sum` |
+| Wrapper jar | `gradle-wrapper.jar` from https://github.com/gradle/gradle at tag `v8.10.2`, SHA-256 `2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046`, matching https://services.gradle.org/distributions/gradle-8.10.2-wrapper.jar.sha256 (checked 2026-10-12). `gradlew` and `gradlew.bat` from the same tag. |
+| Gradle license | Apache 2.0 |
+| Android Gradle Plugin | 8.8.2 (requires Gradle 8.10.2 or later, JDK 17 or later; supported by the installed Android Studio). Fetched from Google Maven by Gradle, verified by Gradle's dependency resolution. License Apache 2.0. |
+| Kotlin Gradle plugin | `org.jetbrains.kotlin.android` 2.1.10, pinned in `android/settings.gradle.kts`. License Apache 2.0. |
+| AndroidX and JUnit | main source set: none. `androidTest` only: `androidx.test:runner:1.6.2`, `androidx.test.ext:junit:1.2.1` (Apache 2.0), `junit:junit:4.13.2` (EPL 1.0). Pinned in `android/app/build.gradle.kts`. |
+
+Gradle downloads go to `GRADLE_USER_HOME=D:\Android\gradle`.
+
+## Not used
+
+- No TrueCrypt or VeraCrypt code (`docs/CONTAINER_FEASIBILITY.md`).
+- No test framework beyond CTest (`docs/DECISIONS.md` D-002).
+- No networking, analytics, or advertising libraries on Android.

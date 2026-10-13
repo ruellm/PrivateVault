@@ -1,0 +1,12 @@
+{
+  "name": "privatevault",
+  "version-string": "0.1.0",
+  "description": "PrivateVault Phase 1 encrypted storage prototype",
+  "builtin-baseline": "9e593bb18ea69cc5095e012465dcd675a822ed0d",
+  "dependencies": [
+    "libsodium"
+  ],
+  "overrides": [
+    { "name": "libsodium", "version": "1.0.22", "port-version": 1 }
+  ]
+}

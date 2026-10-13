@@ -1,0 +1,39 @@
+# Build output
+build/
+out/
+cmake-build-*/
+vcpkg_installed/
+*.obj
+*.o
+*.lib
+*.a
+*.so
+*.dll
+*.exe
+*.pdb
+*.ilk
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.iml
+
+# Android / Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+android/.kotlin/
+*.apk
+*.aab
+
+# Generated test data (large files are produced at test time, never committed)
+tests/generated/
+*.pvo.partial
+
+# Local scratch
+*.log
+*.tmp
