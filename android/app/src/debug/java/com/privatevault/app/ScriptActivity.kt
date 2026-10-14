@@ -39,8 +39,11 @@ class ScriptActivity : Activity() {
             while (i < names.size) {
                 val n = names[i]
                 when {
-                    // Unlocked: everything but a PIN change goes to the vault screen.
-                    entered && !n.startsWith("change_pin=") -> break
+                    // Unlocked: everything but a PIN change and the viewer
+                    // probes goes to the vault screen.
+                    entered && !n.startsWith("change_pin=") && n != "orient_probe" && n != "alloc_probe" -> break
+                    n == "alloc_probe" -> ViewerProbes.allocProbe { Log.i(TAG, it) }
+                    n == "orient_probe" && entered -> ViewerProbes.orientProbe(PvApp.of(this).vaultSession) { Log.i(TAG, it) }
                     n.startsWith("set_idle_ms=") -> {
                         lock.idleTimeoutMs = n.substringAfter('=').toLong()
                         Log.i(TAG, "script: idle timeout ${lock.idleTimeoutMs} ms")

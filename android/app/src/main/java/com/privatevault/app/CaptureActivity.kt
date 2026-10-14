@@ -372,6 +372,9 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
                     rebindAndWait()
                 }
                 name == "memory" -> say(memoryLine())
+                // Heap investigation steps: a pause for a heap dump from the host, a forced collection.
+                name.startsWith("wait=") -> Thread.sleep(name.substringAfter('=').toLong())
+                name == "gc" -> say(HeapActions.gcLine())
                 name.startsWith("test_hook_slow=") -> {
                     // Debug variant only: slows every source read so a kill
                     // during encrypt can be forced from the host.
@@ -379,7 +382,7 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
                     else say("test hooks are not in this build")
                 }
                 name == "test_hook_clear" -> if (BuildConfig.DEBUG) NativeBridge.nativeSetTestHooks(0, 0)
-                name == "video_probe" || name == "v2_probe" -> {
+                name == "video_probe" -> {
                     val runner = VideoProbes.get()
                     if (runner == null) say("$name: not available in this build")
                     else runner.run(name, this, imageCapture, camera, provider, lensFacing, vaults, ::say)

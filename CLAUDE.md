@@ -1,16 +1,18 @@
 # PrivateVault: notes for Claude Code
 
 Read `PROJECT_HANDOFF.md` first. It is the canonical brief for this repository; the
-developer supplies a per-phase brief (`PHASE3A_BRIEF.md` for Stage 3A). `docs/PHASE3A_PROGRESS.md`
-records the current state and the commands that were run (`docs/PHASE1_PROGRESS.md` and
-`docs/PHASE2_PROGRESS.md` for the earlier phases).
+developer supplies a per-phase brief (`PHASE3B_BRIEF.md` for Stage 3B, `PHASE3A_BRIEF.md`
+before it). `docs/PHASE3B_PROGRESS.md` records the current state and the commands that were
+run (`docs/PHASE1_PROGRESS.md`, `docs/PHASE2_PROGRESS.md`, and `docs/PHASE3A_PROGRESS.md`
+for the earlier phases).
 
 ## Layout
 
 - `src/vault_core/` portable C++20 core with a C ABI (`include/pv/pv.h`).
 - `src/desktop_cli/` Windows command line tool and password key provider.
 - `tests/core/` host tests, plain CTest executables.
-- `tests/fixtures/v1/` committed synthetic golden vectors and the test-only key.
+- `tests/fixtures/v1/` committed synthetic golden vectors and the test-only key
+  (`tests/fixtures/exif/` is planned for the Stage 3B orientation fixtures).
 - `android/` Gradle project, Kotlin app (lock screen, vault, capture screen, leak scan),
   Keystore key providers, JNI bridge; `app/src/debug/` holds the video prototype and the
   scripted-actions entry point (`ScriptActivity`, exported by the debug manifest only).

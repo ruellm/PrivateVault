@@ -40,6 +40,8 @@ class Vault private constructor(val dir: File, private var handle: Long) {
     companion object {
         const val DIR_NAME = "vault"
         const val KEY_FILE = "vault.key"
+        // Viewer buffers wiped and freed so far (tests read it).
+        val buffersFreed = java.util.concurrent.atomic.AtomicInteger(0)
 
         fun dirFor(filesDir: File): File = File(filesDir, DIR_NAME)
 
@@ -107,8 +109,12 @@ class Vault private constructor(val dir: File, private var handle: Long) {
     // Raw handle for the debug-only native helpers.
     internal val rawHandle: Long get() = handle
 
-    // Waits for any core call in flight, then wipes the key in the core.
+    // Waits for any core call in flight, then wipes the key in the core. A
+    // viewer decrypt in flight is told to stop first, so the wait is one chunk
+    // long; the flag is cleared once the handle is closed
+    // (docs/PHASE3B_DESIGN.md Section 2.4).
     fun close() {
+        NativeBridge.nativeSetViewerCancel(true)
         guard.writeLock().lock()
         try {
             if (handle != 0L) {
@@ -117,7 +123,81 @@ class Vault private constructor(val dir: File, private var handle: Long) {
             }
         } finally {
             guard.writeLock().unlock()
+            NativeBridge.nativeSetViewerCancel(false)
         }
+    }
+
+    // Phase 3B: viewer support.
+
+    class ObjectEntry(val id: ByteArray, val size: Long, val mtime: Long) {
+        val hex: String get() = NativeBridge.hex(id)
+    }
+
+    // Every object with its file length and modification time, newest first.
+    // Nothing is decrypted.
+    fun listObjects(): List<ObjectEntry> {
+        val objects = File(dir, "objects").listFiles() ?: return emptyList()
+        return objects.filter { it.name.endsWith(".pvo") && it.name.length == 36 }
+            .sortedByDescending { it.lastModified() }
+            .map { ObjectEntry(NativeBridge.fromHex(it.name.removeSuffix(".pvo")), it.length(), it.lastModified()) }
+    }
+
+    // Exact plaintext length from the header and the file length.
+    fun plaintextSize(id: ByteArray): Long {
+        val out = LongArray(1)
+        withHandle("plaintext size") { h -> check(NativeBridge.nativeObjectPlaintextSize(h, id, out), "plaintext size") }
+        return out[0]
+    }
+
+    // Result of a viewer load. The buffer, present for JPEG items only, is
+    // guarded native memory holding the whole plaintext; close wipes and
+    // frees it exactly once. payload is a view starting after the header.
+    class ViewerLoad(
+        val status: Int, val itemStatus: Int, val item: ItemInfo?, val plaintextLen: Long,
+        buffer: ByteBuffer?
+    ) : AutoCloseable {
+        var buffer: ByteBuffer? = buffer
+            private set
+
+        val payload: ByteBuffer?
+            get() {
+                val b = buffer ?: return null
+                val h = item ?: return null
+                val d = b.duplicate()
+                d.position(h.headerLen)
+                return d.slice()
+            }
+
+        override fun close() {
+            val b = buffer ?: return
+            buffer = null
+            NativeBridge.nativeViewerFree(b)
+            buffersFreed.incrementAndGet()
+        }
+    }
+
+    // Decrypts an object into guarded memory for display. Core failures come
+    // back as the status; a closed vault reads as cancelled.
+    fun viewerLoad(id: ByteArray, cap: Long): ViewerLoad {
+        val info = LongArray(9)
+        val out = arrayOfNulls<ByteBuffer>(1)
+        val rc = try {
+            withHandle("viewer load") { h -> NativeBridge.nativeViewerLoad(h, id, cap, info, out) }
+        } catch (e: CoreException) {
+            if (!isOpen) NativeBridge.ERR_CANCELLED else e.code
+        }
+        if (rc != NativeBridge.OK) return ViewerLoad(rc, 0, null, 0, null)
+        val item = if (info[0] == NativeBridge.OK.toLong()) ItemInfo(
+            info[1].toInt(), info[2].toInt(), info[3].toInt(), info[4].toInt(), info[5], info[6], info[7].toInt()
+        ) else null
+        return ViewerLoad(rc, info[0].toInt(), item, info[8], out[0])
+    }
+
+    // Removes one object and its stale partial. Returns the status.
+    fun deleteObject(id: ByteArray): Int = try {
+        withHandle("delete") { h -> NativeBridge.nativeDeleteObject(h, id) }
+    } catch (e: CoreException) {
+        if (!isOpen) NativeBridge.ERR_CANCELLED else e.code
     }
 
     fun encryptSample(seed: ByteArray, length: Long, chunkSize: Int = 0): ByteArray {

@@ -33,6 +33,9 @@ object NativeBridge {
     const val ERR_NOT_ITEM = 23
     // A provider 3 envelope with no slot this reader can use.
     const val ERR_ENVELOPE_NO_SLOT = 24
+    // Viewer codes (Phase 3B).
+    const val ERR_BUFFER_TOO_SMALL = 25
+    const val ERR_CANCELLED = 26
 
     const val VMK_BYTES = 32
     const val OBJECT_ID_BYTES = 16
@@ -134,6 +137,19 @@ object NativeBridge {
     // Makes every encrypt in flight fail at its next read while set.
     external fun nativeSetEncryptCancel(cancel: Boolean)
 
+    // Phase 3B viewer (docs/PHASE3B_DESIGN.md Section 8). Status returned.
+    external fun nativeObjectPlaintextSize(handle: Long, id: ByteArray, out: LongArray): Int
+    // infoOut = [item_status, media_type, rotation, width, height, created_unix_ms,
+    // payload_len, header_len, plaintext_len]; bufferOut[0] is a direct buffer over the
+    // whole plaintext for a JPEG item only, to be given back to nativeViewerFree.
+    external fun nativeViewerLoad(
+        handle: Long, id: ByteArray, cap: Long, infoOut: LongArray, bufferOut: Array<ByteBuffer?>
+    ): Int
+    external fun nativeViewerFree(buffer: ByteBuffer)
+    // The flag pv_vault_decrypt_to_buffer polls; Vault.close sets and clears it.
+    external fun nativeSetViewerCancel(cancel: Boolean)
+    external fun nativeDeleteObject(handle: Long, id: ByteArray): Int
+
     // Phase 2. fields = [media_type, rotation_degrees, width, height, created_unix_ms].
     // Direct buffer: the native side reads the bytes in place.
     external fun nativeEncryptItem(
@@ -164,6 +180,16 @@ object NativeBridge {
     // Debug variant only: while set, nativePinStretch reports the allocation
     // failure code (ERR_OUT_OF_MEMORY) without running the KDF.
     external fun nativeSetPinStretchFailure(fail: Boolean)
+    // Debug variant only: Stage 3B viewer probes. out = [alloc_ok, mlock_errno,
+    // rlimit_cur, rlimit_max, alloc_ms, free_ms]. The direct buffer wraps
+    // sodium_malloc memory holding the whole plaintext and must be given back
+    // to nativeProbeFreeDirect, which wipes it.
+    external fun nativeProbeSecureAlloc(size: Long, out: LongArray): Int
+    external fun nativeProbeDecryptDirect(handle: Long, id: ByteArray, length: Long, statusOut: IntArray): ByteBuffer?
+    external fun nativeProbeFreeDirect(buffer: ByteBuffer)
+    // Debug variant only: viewer loads report the allocation failure code while
+    // allocFail is set; each viewer decrypt starts slowMs late.
+    external fun nativeSetViewerHooks(allocFail: Boolean, slowMs: Int)
 
     // Name plus the raw value, so an unexpected code is never hidden.
     fun errorName(code: Int): String = "${nativeErrorName(code)} ($code)"

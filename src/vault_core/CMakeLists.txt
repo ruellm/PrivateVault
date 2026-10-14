@@ -8,6 +8,7 @@ add_library(vault_core STATIC
     src/item.cpp
     src/pin.cpp
     src/envelope3.cpp
+    src/viewer.cpp
 )
 
 target_include_directories(vault_core

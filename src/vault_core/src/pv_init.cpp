@@ -49,6 +49,8 @@ const char* pv_error_name(int code) {
         case PV_ERR_ITEM_UNSUPPORTED: return "PV_ERR_ITEM_UNSUPPORTED";
         case PV_ERR_NOT_ITEM: return "PV_ERR_NOT_ITEM";
         case PV_ERR_ENVELOPE_NO_SLOT: return "PV_ERR_ENVELOPE_NO_SLOT";
+        case PV_ERR_BUFFER_TOO_SMALL: return "PV_ERR_BUFFER_TOO_SMALL";
+        case PV_ERR_CANCELLED: return "PV_ERR_CANCELLED";
         default: return "PV_ERR_UNKNOWN";
     }
 }

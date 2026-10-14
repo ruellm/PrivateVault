@@ -169,6 +169,24 @@ int dir_exists(const std::string& path, bool* out) {
     return PV_OK;
 }
 
+int file_size(const std::string& path, uint64_t* out) {
+    std::wstring w;
+    if (!to_wide(path, w)) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExW(w.c_str(), GetFileExInfoStandard, &fa)) {
+        DWORD e = GetLastError();
+        return fail((e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) ? PV_ERR_NOT_FOUND
+                                                                             : PV_ERR_IO);
+    }
+    *out = (static_cast<uint64_t>(fa.nFileSizeHigh) << 32) | fa.nFileSizeLow;
+    return PV_OK;
+}
+
+void sync_dir(const std::string&) {
+}
+
 int remove_file(const std::string& path) {
     std::wstring w;
     if (!to_wide(path, w)) {
@@ -344,6 +362,23 @@ int dir_exists(const std::string& path, bool* out) {
     struct stat st;
     *out = ::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
     return PV_OK;
+}
+
+int file_size(const std::string& path, uint64_t* out) {
+    struct stat st;
+    if (::stat(path.c_str(), &st) != 0) {
+        return fail(errno == ENOENT ? PV_ERR_NOT_FOUND : PV_ERR_IO);
+    }
+    *out = static_cast<uint64_t>(st.st_size);
+    return PV_OK;
+}
+
+void sync_dir(const std::string& dir) {
+    int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd >= 0) {
+        ::fsync(fd);
+        ::close(fd);
+    }
 }
 
 int remove_file(const std::string& path) {

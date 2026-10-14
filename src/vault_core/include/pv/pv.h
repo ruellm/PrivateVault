@@ -44,6 +44,9 @@ extern "C" {
 // A provider 3 envelope that parsed but holds no slot this reader can use
 // (Phase 3A). See docs/PHASE3A_DESIGN.md Section 2.
 #define PV_ERR_ENVELOPE_NO_SLOT 24
+// Viewer codes (Phase 3B). See docs/PHASE3B_DESIGN.md Section 7.
+#define PV_ERR_BUFFER_TOO_SMALL 25
+#define PV_ERR_CANCELLED 26
 
 // Sizes fixed by the format. Key sizes equal the libsodium constants; the
 // core checks that at compile time.
@@ -323,6 +326,39 @@ int pv_vault_open_envelope3(const char* vault_dir, const uint8_t* kek, size_t ke
 int pv_vault_write_envelope3(pv_vault* v, const pv_envelope3_params* p, const uint8_t* kek,
                              size_t kek_len);
 int pv_vault_destroy_files(const char* vault_dir);
+
+// Viewer support (Phase 3B, docs/PHASE3B_DESIGN.md Sections 2, 6, 7).
+
+// Exact plaintext length of an object from its header and its file length,
+// without decrypting. The header is validated first and its object ID must
+// equal the name. A file too short for a final chunk gives PV_ERR_TRUNCATED;
+// bytes that form no whole chunk give PV_ERR_MALFORMED_CHUNK. For a damaged
+// file the value is only a plausible number that a decrypt then refutes.
+// The _file form takes a path and skips the ID check (used by pv inspect).
+int pv_object_plaintext_size(pv_vault* v, const uint8_t* object_id, uint64_t* out);
+int pv_object_plaintext_size_file(const char* path, uint64_t* out);
+
+// Decrypts an object into buf. The plaintext length is computed first; if it
+// is above cap the call returns PV_ERR_BUFFER_TOO_SMALL before any byte is
+// written, and the same holds for every failure of that first step. Once the
+// stream starts, any failure (authentication, truncation, trailing data, I/O,
+// cancel, a plaintext longer than cap) wipes all cap bytes before the call
+// returns. cancel may be NULL; when it points at a nonzero int the call stops
+// at the next chunk with PV_ERR_CANCELLED. On PV_OK *out_len (may be NULL) is
+// the plaintext length.
+int pv_vault_decrypt_to_buffer(pv_vault* v, const uint8_t* object_id, uint8_t* buf, uint64_t cap,
+                               uint64_t* out_len, const volatile int* cancel);
+
+// Memory for plaintext: sodium_malloc (guard pages, canary, wiped on free; the
+// memory lock is attempted and not guaranteed). n must be nonzero. free takes
+// the pointer and the size it was allocated with; NULL is ignored.
+int pv_secure_alloc(size_t n, void** out);
+void pv_secure_free(void* p, size_t n);
+
+// Removes objects/<id>.pvo and a matching .partial, then syncs the directory.
+// A missing object file gives PV_ERR_NOT_FOUND (a lone partial is still
+// removed). Removal of the directory entry only; see the threat model.
+int pv_vault_delete_object(pv_vault* v, const uint8_t* object_id);
 
 #ifdef __cplusplus
 }

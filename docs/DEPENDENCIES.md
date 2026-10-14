@@ -117,6 +117,26 @@ D-013). In the release variant `camera-view` still pulls `camera-video` 1.6.2, w
 the release variant therefore contains media3 classes it never calls. The debug APK is
 17.6 MB against 4.1 MB in Phase 1, mostly CameraX, media3, guava, and their dependencies.
 
+## Phase 3B dependency cleanup (2026-10-14)
+
+`androidx.camera:camera-video` is excluded on the `camera-view` dependency and no longer
+declared for the debug variant (P3-10, D-022). With it, media3 1.9.0 and guava left the
+benchmark and release variants; `com.google.guava:listenablefuture` resolves to its real 1.0
+artifact there. `androidx.media3:media3-muxer:1.11.1` stays `debugImplementation` for the
+video prototype (`media3-common` and `media3-container` 1.11.1 with it); 1.11.1 is the newest
+1.11.x on Google Maven (checked 2026-10-14). Classes defined per APK, from the dex
+`class_defs`:
+
+| APK | media3 | `androidx.camera.video` | Size before | Size after |
+|---|---|---|---|---|
+| debug | 626 | 445 then 0 | 19 036 751 | 17 608 236 (with the viewer code; 19 039 140 right after the removal) |
+| benchmark | 557 then 0 | 443 then 0 | 13 822 758 | 10 578 545 (10 529 341 right after the removal) |
+| release (unsigned) | 0 | 0 | not built in 3A | 10 570 353 (10 521 149 right after the removal) |
+
+The viewer adds no dependency: `GridView`, `ImageDecoder`, `android.media.ExifInterface`, and
+the gesture detectors are platform classes (D-026). The `ACCESS_NETWORK_STATE` merge rule of
+D-013 stays because the debug variant still carries `media3-common`.
+
 ## Phase 3A Android dependencies (added in Milestone D, 2026-10-14)
 
 Fetched from Google Maven by Gradle and pinned in `android/app/build.gradle.kts`. License

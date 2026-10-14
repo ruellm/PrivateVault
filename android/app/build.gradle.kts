@@ -17,8 +17,8 @@ android {
         applicationId = "com.privatevault.app"
         minSdk = 28
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.4.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
@@ -69,11 +69,17 @@ android {
         }
     }
 
-    // Golden vectors are packaged as assets of the instrumented test APK only.
+    // Golden vectors and the EXIF orientation fixtures are packaged as assets
+    // of the instrumented test APK only. Both directories carry a README,
+    // which the asset merge would report as a duplicate, so READMEs are not
+    // packaged (the default ignore pattern plus README.md).
     sourceSets {
         getByName("androidTest") {
-            assets.srcDirs("../../tests/fixtures/v1")
+            assets.srcDirs("../../tests/fixtures/v1", "../../tests/fixtures/exif")
         }
+    }
+    androidResources {
+        ignoreAssetsPattern = "!.svn:!.git:!.ds_store:!*.scc:.*:<dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~:!README.md"
     }
 
     compileOptions {
@@ -100,11 +106,15 @@ dependencies {
     implementation("androidx.camera:camera-core:1.6.2")
     implementation("androidx.camera:camera-camera2:1.6.2")
     implementation("androidx.camera:camera-lifecycle:1.6.2")
-    implementation("androidx.camera:camera-view:1.6.2")
+    // camera-view declares camera-video, which brings media3 1.9.0 and guava
+    // into every variant. The app uses PreviewView only, so camera-video is
+    // kept out (docs/PHASE3B_DESIGN.md, P3-10).
+    implementation("androidx.camera:camera-view:1.6.2") {
+        exclude(group = "androidx.camera", module = "camera-video")
+    }
     // ComponentActivity is the LifecycleOwner CameraX binds to.
     implementation("androidx.activity:activity:1.10.1")
-    // Video feasibility prototype, debug variant only.
-    debugImplementation("androidx.camera:camera-video:1.6.2")
+    // Video feasibility prototype muxer, debug variant only.
     debugImplementation("androidx.media3:media3-muxer:1.11.1")
 
     androidTestImplementation("androidx.test:runner:1.6.2")

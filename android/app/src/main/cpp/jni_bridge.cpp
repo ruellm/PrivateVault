@@ -9,6 +9,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <jni.h>
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -66,6 +69,14 @@ struct KeyCopy {
 pv_vault* handle_to_vault(jlong h) {
     return reinterpret_cast<pv_vault*>(static_cast<intptr_t>(h));
 }
+
+#ifdef PV_DEBUG_HOOKS
+jlong mono_ms() {
+    struct timespec ts {};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<jlong>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
+}
+#endif
 
 // Decrypts from an open source into a BLAKE2b sink and reports hash and length.
 int decrypt_to_hash(JNIEnv* env, const uint8_t* vmk, pv_source* src, const uint8_t* expected_id,
@@ -841,6 +852,159 @@ Java_com_privatevault_app_NativeBridge_nativeSetEncryptCancel(JNIEnv*, jclass, j
     g_cancel_encrypts.store(cancel == JNI_TRUE);
 }
 
+// Stage 3B viewer entry points (docs/PHASE3B_DESIGN.md Section 8).
+
+// Polled by pv_vault_decrypt_to_buffer between chunks. Vault.close sets it
+// before it waits for the call in flight and clears it afterwards.
+volatile int g_viewer_cancel = 0;
+#ifdef PV_DEBUG_HOOKS
+std::atomic<bool> g_viewer_alloc_fail{false};
+std::atomic<int> g_viewer_slow_ms{0};
+#endif
+
+JNIEXPORT void JNICALL
+Java_com_privatevault_app_NativeBridge_nativeSetViewerCancel(JNIEnv*, jclass, jboolean cancel) {
+    g_viewer_cancel = cancel == JNI_TRUE ? 1 : 0;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeObjectPlaintextSize(JNIEnv* env, jclass, jlong handle,
+                                                                 jbyteArray id, jlongArray out) {
+    std::vector<uint8_t> oid;
+    if (!copy_bytes(env, id, PV_OBJECT_ID_BYTES, oid) || !out || env->GetArrayLength(out) < 1) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    uint64_t size = 0;
+    int rc = pv_object_plaintext_size(handle_to_vault(handle), oid.data(), &size);
+    if (rc == PV_OK) {
+        jlong v = static_cast<jlong>(size);
+        env->SetLongArrayRegion(out, 0, 1, &v);
+    }
+    return rc;
+}
+
+// Allocates guarded memory for the whole plaintext, decrypts into it, and
+// decodes the item header. Returns the decrypt status. On PV_OK info_out =
+// [item_status, media_type, rotation, width, height, created_unix_ms,
+// payload_len, header_len, plaintext_len] and, for a JPEG item only,
+// buffer_out[0] is a direct ByteBuffer over the plaintext that the caller
+// gives back to nativeViewerFree. Every other outcome leaves nothing
+// allocated: the buffer of an unknown item is wiped here at once.
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeViewerLoad(JNIEnv* env, jclass, jlong handle,
+                                                        jbyteArray id, jlong cap,
+                                                        jlongArray info_out,
+                                                        jobjectArray buffer_out) {
+    std::vector<uint8_t> oid;
+    if (!copy_bytes(env, id, PV_OBJECT_ID_BYTES, oid) || cap < 0 || !info_out ||
+        env->GetArrayLength(info_out) < 9 || !buffer_out || env->GetArrayLength(buffer_out) < 1) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    env->SetObjectArrayElement(buffer_out, 0, nullptr);
+    pv_vault* v = handle_to_vault(handle);
+    uint64_t size = 0;
+    int rc = pv_object_plaintext_size(v, oid.data(), &size);
+    if (rc != PV_OK) {
+        return rc;
+    }
+    if (size > static_cast<uint64_t>(cap)) {
+        return PV_ERR_BUFFER_TOO_SMALL;
+    }
+    jlong info[9] = {PV_ERR_NOT_ITEM, 0, 0, 0, 0, 0, 0, 0, static_cast<jlong>(size)};
+    if (size == 0) {
+        // Nothing to decrypt and no room for a header.
+        env->SetLongArrayRegion(info_out, 0, 9, info);
+        return PV_OK;
+    }
+#ifdef PV_DEBUG_HOOKS
+    if (g_viewer_alloc_fail.load()) {
+        return PV_ERR_OUT_OF_MEMORY;
+    }
+#endif
+    void* buf = nullptr;
+    rc = pv_secure_alloc(static_cast<size_t>(size), &buf);
+    if (rc != PV_OK) {
+        return rc;
+    }
+#ifdef PV_DEBUG_HOOKS
+    int slow = g_viewer_slow_ms.load();
+    if (slow > 0) {
+        // Delays the start of the decrypt so a lock can arrive while this
+        // call holds the vault guard.
+        ::usleep(static_cast<useconds_t>(slow) * 1000);
+    }
+#endif
+    uint64_t len = 0;
+    rc = pv_vault_decrypt_to_buffer(v, oid.data(), static_cast<uint8_t*>(buf), size, &len,
+                                    &g_viewer_cancel);
+    if (rc != PV_OK) {
+        pv_secure_free(buf, static_cast<size_t>(size));
+        return rc;
+    }
+    pv_item_header h{};
+    int item_rc = pv_item_header_decode(static_cast<const uint8_t*>(buf), static_cast<size_t>(len), &h);
+    if (item_rc == PV_OK) {
+        item_rc = pv_item_header_check_len(&h, len);
+    }
+    info[0] = item_rc;
+    if (item_rc == PV_OK) {
+        info[1] = h.media_type;
+        info[2] = h.rotation_degrees;
+        info[3] = static_cast<jlong>(h.width);
+        info[4] = static_cast<jlong>(h.height);
+        info[5] = static_cast<jlong>(h.created_unix_ms);
+        info[6] = static_cast<jlong>(h.payload_len);
+        info[7] = h.header_len;
+    }
+    info[8] = static_cast<jlong>(len);
+    if (item_rc == PV_OK && h.media_type == PV_MEDIA_JPEG) {
+        jobject bb = env->NewDirectByteBuffer(buf, static_cast<jlong>(len));
+        if (!bb) {
+            pv_secure_free(buf, static_cast<size_t>(size));
+            return PV_ERR_INTERNAL;
+        }
+        env->SetObjectArrayElement(buffer_out, 0, bb);
+    } else {
+        pv_secure_free(buf, static_cast<size_t>(size));
+    }
+    env->SetLongArrayRegion(info_out, 0, 9, info);
+    return PV_OK;
+}
+
+// Wipes and frees a buffer from nativeViewerLoad.
+JNIEXPORT void JNICALL
+Java_com_privatevault_app_NativeBridge_nativeViewerFree(JNIEnv* env, jclass, jobject buffer) {
+    if (!buffer) {
+        return;
+    }
+    void* p = env->GetDirectBufferAddress(buffer);
+    jlong cap = env->GetDirectBufferCapacity(buffer);
+    if (p && cap > 0) {
+        pv_secure_free(p, static_cast<size_t>(cap));
+    }
+}
+
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeDeleteObject(JNIEnv* env, jclass, jlong handle,
+                                                          jbyteArray id) {
+    std::vector<uint8_t> oid;
+    if (!copy_bytes(env, id, PV_OBJECT_ID_BYTES, oid)) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    return pv_vault_delete_object(handle_to_vault(handle), oid.data());
+}
+
+#ifdef PV_DEBUG_HOOKS
+// Debug variant only: makes the next viewer loads report the allocation
+// failure code, and delays the start of each viewer decrypt by slow_ms.
+JNIEXPORT void JNICALL
+Java_com_privatevault_app_NativeBridge_nativeSetViewerHooks(JNIEnv*, jclass, jboolean alloc_fail,
+                                                            jint slow_ms) {
+    g_viewer_alloc_fail.store(alloc_fail == JNI_TRUE);
+    g_viewer_slow_ms.store(slow_ms);
+}
+#endif
+
 // Phase 2 entry points.
 
 // Encrypts length bytes at buffer[offset] (a direct ByteBuffer) as an item.
@@ -996,6 +1160,107 @@ Java_com_privatevault_app_NativeBridge_nativeSetTestHooks(JNIEnv*, jclass, jint 
                                                           jlong fail_after_bytes) {
     g_slow_read_ms.store(slow_read_ms);
     g_fail_after_bytes.store(fail_after_bytes);
+}
+
+// Stage 3B viewer probes (docs/PHASE3B_PROGRESS.md, Milestone A). Debug
+// variant only.
+
+// Allocates size bytes with sodium_malloc, asks for a memory lock on the block
+// a second time to see the answer sodium_malloc ignores, and frees it.
+// out = [alloc_ok, mlock_errno, rlimit_memlock_cur, rlimit_memlock_max,
+// alloc_ms, free_ms].
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeProbeSecureAlloc(JNIEnv* env, jclass, jlong size,
+                                                              jlongArray out) {
+    if (size <= 0 || !out || env->GetArrayLength(out) < 6) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    struct rlimit rl {};
+    getrlimit(RLIMIT_MEMLOCK, &rl);
+    jlong vals[6] = {0, 0, static_cast<jlong>(rl.rlim_cur), static_cast<jlong>(rl.rlim_max), 0, 0};
+    jlong t0 = mono_ms();
+    void* p = sodium_malloc(static_cast<size_t>(size));
+    vals[4] = mono_ms() - t0;
+    if (p) {
+        vals[0] = 1;
+        if (mlock(p, static_cast<size_t>(size)) != 0) {
+            vals[1] = errno;
+        } else {
+            munlock(p, static_cast<size_t>(size));
+        }
+        jlong t1 = mono_ms();
+        sodium_free(p);
+        vals[5] = mono_ms() - t1;
+    } else {
+        vals[1] = errno;
+    }
+    env->SetLongArrayRegion(out, 0, 6, vals);
+    return PV_OK;
+}
+
+// Decrypts the whole plaintext of an object into sodium_malloc memory and
+// returns a direct ByteBuffer over it, for the viewer probe. length is the
+// plaintext length from a previous verify; a plaintext of another length
+// fails. The caller frees the buffer with nativeProbeFreeDirect; on failure
+// nothing stays allocated. status_out[0] gets the status.
+JNIEXPORT jobject JNICALL
+Java_com_privatevault_app_NativeBridge_nativeProbeDecryptDirect(JNIEnv* env, jclass, jlong handle,
+                                                                jbyteArray id, jlong length,
+                                                                jintArray status_out) {
+    std::vector<uint8_t> oid;
+    jint rc = PV_ERR_INVALID_ARGUMENT;
+    jobject result = nullptr;
+    if (copy_bytes(env, id, PV_OBJECT_ID_BYTES, oid) && length >= 0) {
+        struct Fill {
+            uint8_t* p;
+            size_t cap;
+            size_t n;
+        } f{nullptr, static_cast<size_t>(length), 0};
+        f.p = static_cast<uint8_t*>(sodium_malloc(f.cap == 0 ? 1 : f.cap));
+        if (!f.p) {
+            rc = PV_ERR_OUT_OF_MEMORY;
+        } else {
+            pv_sink sink{&f, [](void* ctx, const uint8_t* buf, size_t n) {
+                             Fill* ff = static_cast<Fill*>(ctx);
+                             if (ff->n + n > ff->cap) {
+                                 return -1;
+                             }
+                             std::memcpy(ff->p + ff->n, buf, n);
+                             ff->n += n;
+                             return 0;
+                         }};
+            uint64_t len = 0;
+            rc = pv_vault_decrypt(handle_to_vault(handle), oid.data(), &sink, &len);
+            if (rc == PV_OK && len != f.cap) {
+                rc = PV_ERR_INVALID_ARGUMENT;
+            }
+            if (rc == PV_OK) {
+                result = env->NewDirectByteBuffer(f.p, static_cast<jlong>(f.cap));
+                if (!result) {
+                    rc = PV_ERR_INTERNAL;
+                }
+            }
+            if (rc != PV_OK) {
+                sodium_free(f.p);
+            }
+        }
+    }
+    if (status_out && env->GetArrayLength(status_out) >= 1) {
+        env->SetIntArrayRegion(status_out, 0, 1, &rc);
+    }
+    return result;
+}
+
+// Wipes and frees a buffer from nativeProbeDecryptDirect.
+JNIEXPORT void JNICALL
+Java_com_privatevault_app_NativeBridge_nativeProbeFreeDirect(JNIEnv* env, jclass, jobject buffer) {
+    if (!buffer) {
+        return;
+    }
+    void* p = env->GetDirectBufferAddress(buffer);
+    if (p) {
+        sodium_free(p);
+    }
 }
 #endif
 

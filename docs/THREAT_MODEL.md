@@ -189,3 +189,48 @@ been reviewed. Design: `docs/PHASE3A_DESIGN.md`.
   allocation may fail and the unlock reports it instead of weakening the parameters.
 - Erased files are directory-entry removals; flash blocks may persist until reuse.
 - Nothing here has been independently reviewed.
+
+## 8. Phase 3B additions: photo viewer and delete (approved 2026-10-14 at the Milestone B checkpoint, to be confirmed at Milestone E)
+
+What Stage 3B claims, and only this: **a photo is decrypted for display only into memory
+the app controls, that memory is wiped when the decode is done, the decoded bitmap is erased
+when the viewer stops or the vault locks, and nothing about a photo is written to storage.**
+What the platform does with the pixels after the app hands them to a view is outside that
+claim. Design: `docs/PHASE3B_DESIGN.md`.
+
+### 8.1 New assets
+
+| Asset | Where it lives | Lifetime |
+|---|---|---|
+| Decrypted object plaintext (item header plus JPEG) | One `sodium_malloc` block per load (guard pages, canary, wiped on free; not locked, see 8.3) | From decrypt to the end of the decode, tens of milliseconds |
+| Decoded pixels | A mutable software `Bitmap` in the viewer, and up to 32 thumbnails of 256 px in a cache | Until the activity stops, the vault locks, or the cache evicts; erased with `eraseColor(0)` before `recycle()` |
+| Decoder, render, and compositor copies | `ImageDecoder` scratch rows, the view render node and its GPU texture, SurfaceFlinger buffers | Platform lifetime; not under app control |
+| Object list metadata | Object IDs, file lengths, modification times read from the directory for the gallery | Shown while the gallery is open; already visible on disk (Phase 1 position) |
+
+### 8.2 Threats and the Stage 3B position
+
+| # | Threat | Position |
+|---|---|---|
+| T25 | Screenshot, screen recording, or recents card of the gallery or viewer | `FLAG_SECURE` on both activities; the recents card is checked on the Xiaomi in T3. No `Dialog`, popup, or toast carries content (P3-14). |
+| T26 | Plaintext left in memory after viewing | The guarded block is wiped right after the decode on every path (success, failure, cancel); the bitmap is erased and recycled on stop, lock, eviction, and replacement; a load whose result arrives after a stop is erased at once. Decoder scratch, render node, GPU texture, and compositor buffers are not erased by the app. |
+| T27 | Plaintext in zram | Decrypted buffers are guarded and wiped but not locked: `RLIMIT_MEMLOCK` is 64 KiB on both devices and `sodium_malloc` ignores the refusal, so their pages can reach zram (compressed swap in RAM) while the buffer exists. Bitmaps are ordinary heap memory with the same exposure. |
+| T28 | A damaged, truncated, or wrong-key object shows a partial image | The buffer is filled by the Phase 1 decrypt and used only after the FINAL chunk verified; on any failure the core wipes the whole buffer before returning. A damaged object is a labelled tile. |
+| T29 | An oversized object exhausts memory | Objects above 32 MiB of plaintext are never decrypted for display; the size comes from the header and file length without decrypting. |
+| T30 | Lock while a photo is being decrypted or decoded | The decrypt stops at the next chunk with `PV_ERR_CANCELLED` and the buffer is wiped; a decode in flight ends within its bound and its bitmap is erased; the activities finished on `LOCKED_UI`. |
+| T31 | Delete does not remove the content | Delete removes the directory entry of the object (and a stale partial). The ciphertext blocks may persist on flash until reuse; the DEK that would decrypt them is inside that same ciphertext, wrapped by the VMK. No erasure beyond the directory entry is claimed; cryptographic erasure is a Phase 6 item. |
+| T32 | Thumbnails or decoded images reach storage | No thumbnail store, no cache files, no `MediaStore` output; `leak_scan` after a viewer session that opens every photo and scrolls the gallery is a T2 and T3 step. |
+
+### 8.3 Residual risks
+
+- Decoder and GPU copies (8.1, T26) and the unlocked guarded block (T27) are outside the
+  app; the app does not claim erasure of them.
+- The heap finding of the capture burst (brief 4.7): on the emulator (Stage 3B, Milestone
+  D) the Java heap peak rises by about 1 MB per 571 KB capture until a collection and
+  drops back after it, the same shape as on the Xiaomi in Phase 2; the allocating class and
+  whether the array holds image data are not yet measured (the Studio profiler step of the
+  phone run, design Section 10). Until then the position is: CameraX may hold one
+  JPEG-sized copy of each capture in the Java heap until the next collection.
+- An authorized viewer can photograph the screen (Phase 1 position); nothing in 3B changes
+  that. The Phase 4 experiment is the first attempt to make such copies less useful and
+  promises nothing.
+- Nothing here has been independently reviewed.

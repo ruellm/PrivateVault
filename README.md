@@ -2,8 +2,10 @@
 
 R&D for a decentralized, privately stored media vault. Phase 1 built the encrypted storage
 core (C++20, libsodium), a Windows command line tool, and an Android proof of concept that
-share one object format. Phase 2 adds in-app photo capture straight into encrypted objects,
-a plaintext exposure scan, and a video feasibility prototype.
+share one object format. Phase 2 added in-app photo capture straight into encrypted objects,
+a plaintext exposure scan, and a video feasibility prototype. Phase 3A added the PIN lock.
+Stage 3B adds the gallery and the photo viewer, delete of one photo, and removes
+`camera-video` from every build variant.
 
 This is a research prototype. It has not been audited and must not hold real private media.
 
@@ -12,13 +14,15 @@ Documents:
 - `PROJECT_HANDOFF.md`: the project brief and Phase 1 specification; `PHASE2_BRIEF.md` (developer supplied) for Phase 2.
 - `docs/PHASE1_DESIGN.md`: object and envelope formats, key hierarchy, C ABI.
 - `docs/PHASE2_DESIGN.md`: capture pipeline, media item header, ABI additions, leak scan, video options.
+- `docs/PHASE3A_DESIGN.md`: PIN lock, envelope provider 3, lock rules, erase.
+- `docs/PHASE3B_DESIGN.md`: gallery and viewer pipeline, orientation rule, viewer ABI, delete, dependency cleanup.
 - `docs/VIDEO_CAPTURE_FEASIBILITY.md`: what was tried for video, measurements, recommendation.
 - `docs/THREAT_MODEL.md`: what the prototype defends against and what it does not.
 - `docs/DEPENDENCIES.md`: pinned versions, sources, licenses, verification.
 - `docs/DECISIONS.md`: engineering choices with alternatives.
 - `docs/CONTAINER_FEASIBILITY.md`: why TrueCrypt-style containers are not the foundation.
-- `docs/PHASE1_PROGRESS.md`, `docs/PHASE2_PROGRESS.md`: state of the work and commands run.
-- `docs/PHASE1_TEST_REPORT.md`, `docs/PHASE2_TEST_REPORT.md`: results per test tier.
+- `docs/PHASE1_PROGRESS.md` to `docs/PHASE3B_PROGRESS.md`: state of the work and commands run.
+- `docs/PHASE1_TEST_REPORT.md` to `docs/PHASE3B_TEST_REPORT.md`: results per test tier.
 
 ## Layout
 
@@ -28,6 +32,7 @@ src/vault_core/      portable core: include/pv/pv.h is the C ABI
 src/desktop_cli/     pv tool, password prompt, Argon2id key envelope
 tests/core/          host tests (CTest), tests/tools/make_vectors.cpp
 tests/fixtures/v1/   committed golden vectors and the TEST ONLY key
+tests/fixtures/exif/ synthetic JPEGs with hand-built EXIF orientation tags (viewer tests)
 android/             Gradle project: Kotlin app, Keystore envelope, JNI bridge
 docs/                design, threat model, dependencies, decisions, reports
 ```
@@ -85,7 +90,7 @@ pv init <vault_dir>                          create a vault; asks for a password
 pv encrypt <vault_dir> <file> [--chunk-size N]   prints the new object id
 pv decrypt <vault_dir> <object_id> <out_file>    writes <out_file>.pvtmp, renames on success
 pv verify <vault_dir> <object_id>                decrypts into a hash, prints the length and the item fields
-pv inspect <vault_dir> <object_id>               header fields, no password needed
+pv inspect <vault_dir> <object_id>               header fields and the plaintext length, no password needed
 pv inspect-file <path.pvo>
 pv version
 ```
@@ -135,9 +140,16 @@ existing Phase 1 or 2 vault asks for a PIN once and is rewrapped in place. The v
 on background, screen off, 5 minutes idle, and the Lock button; a process restart always
 starts locked. Five wrong PINs start a 30 s delay that doubles per attempt (cap 1 h).
 "Forgot PIN: erase vault" on the lock screen deletes the keys and every object after the
-word `ERASE` is typed. The lock screen also has a Diagnostics button (Argon2id timing and
+the word `ERASE` is typed. The lock screen also has a Diagnostics button (Argon2id timing and
 the Keystore HMAC probe) that needs no vault, so the benchmark build can be measured on a
 phone by hand. Design: `docs/PHASE3A_DESIGN.md`.
+
+Since Stage 3B the vault screen has a Gallery button: a grid of every object, newest first,
+with thumbnails decoded from guarded memory and labelled tiles for objects that are not
+photos (large, unknown, damaged). Tapping a photo opens the viewer (fit to screen, pinch to
+2x, double tap), whose Delete button removes the object after an in-activity confirmation.
+Thumbnails and the viewer bitmap are erased when the screens stop or the vault locks.
+Design: `docs/PHASE3B_DESIGN.md`.
 
 T3 steps on a device are scripted through the `actions` extra of the debug-only
 `ScriptActivity`, which must unlock first: the list starts with `unlock_pin=<pin>` or
@@ -151,7 +163,10 @@ the app before each launch. Capture actions (`capture_photo`,
 permission granted (`adb shell pm grant com.privatevault.app android.permission.CAMERA` on a
 test device, or the on-screen dialog). Other actions: `open`, `encrypt_1mb`, `encrypt_100mb`,
 `verify_all` (alias `verify`), `list`, `leak_scan`, `tamper`, `truncation`, `wrong_key`,
-`security_level`, `close`:
+`security_level`, `view_all` (every object through the viewer pipeline at thumbnail and
+screen size, one line per object), `gallery` (opens the gallery screen), `delete_object=<id hex>`,
+`gc` (forced collection with heap figures), and before the unlock `alloc_probe`; right after
+the unlock `orient_probe` prints the orientation data of every photo (debug build only):
 
 ```
 adb install app-debug.apk
@@ -163,6 +178,8 @@ adb shell am start -n com.privatevault.app/.ScriptActivity --es actions unlock_p
 adb shell am force-stop com.privatevault.app
 adb shell am start -n com.privatevault.app/.ScriptActivity --es actions unlock_pin=246810,tamper,truncation,wrong_key,security_level
 adb shell am start -n com.privatevault.app/.ScriptActivity --es actions unlock_pin=246810,capture_photo_n=10,verify_all,list,leak_scan
+adb shell am start -n com.privatevault.app/.ScriptActivity --es actions unlock_pin=246810,view_all,leak_scan,gallery
+adb shell am start -n com.privatevault.app/.ScriptActivity --es actions unlock_pin=246810,orient_probe,alloc_probe
 adb shell am start -n com.privatevault.app/.ScriptActivity --es actions unlock_pin=246810,video_probe,leak_scan     # debug build only
 adb shell am start -n com.privatevault.app/.ScriptActivity --es actions kdf_bench,hmac_probe        # no vault needed
 adb logcat -d -s PrivateVault:I

@@ -118,6 +118,31 @@ int main(int argc, char** argv) {
         CHECK_EQ(pv_object_decrypt(ts::other_vmk().data(), PV_VMK_BYTES, &src, &js, nullptr,
                                    nullptr), PV_ERR_WRONG_VMK);
         pv_file_source_close(&src);
+
+        // The viewer path (Phase 3B): the vector copied into a vault directory
+        // reports its exact plaintext length without decrypting and decrypts
+        // into a buffer of that length with the same payload hash.
+        {
+            const std::string vdir = "golden_vault";
+            ts::remove_tree(vdir);
+            CHECK_EQ(pv_vault_create(vdir.c_str()), PV_OK);
+            ts::write_file(vdir + "/objects/" + id_hex + ".pvo", ts::read_file(path));
+            pv_vault* v = nullptr;
+            CHECK_EQ(pv_vault_open(vdir.c_str(), ts::test_vmk(), PV_VMK_BYTES, &v), PV_OK);
+            uint64_t size = 0;
+            CHECK_EQ(pv_object_plaintext_size(v, info.object_id, &size), PV_OK);
+            CHECK_EQ(size, length);
+            ts::Bytes buf(static_cast<size_t>(length) + 1, 0xaa);
+            uint64_t got = 0;
+            CHECK_EQ(pv_vault_decrypt_to_buffer(v, info.object_id, buf.data(), length, &got, nullptr), PV_OK);
+            CHECK_EQ(got, length);
+            CHECK_EQ(buf[static_cast<size_t>(length)], 0xaa);
+            size_t skip = is_item ? PV_ITEM_HEADER_BYTES : 0;
+            ts::Bytes payload(buf.begin() + static_cast<ptrdiff_t>(skip), buf.begin() + static_cast<ptrdiff_t>(length));
+            CHECK_EQ(ts::hex(ts::blake2b(payload)), hash_hex);
+            pv_vault_close(v);
+            ts::remove_tree(vdir);
+        }
         ++count;
         std::printf("%s ok (%llu bytes%s)\n", name.c_str(), static_cast<unsigned long long>(length),
                     is_item ? ", item" : "");

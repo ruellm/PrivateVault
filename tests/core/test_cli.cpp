@@ -89,6 +89,7 @@ int main() {
     CHECK_EQ(run("inspect " + vault + " " + id), 0);
     CHECK(contains(read_text(kOut), "chunk_size 65536"));
     CHECK(contains(read_text(kOut), "object_id " + id));
+    CHECK(contains(read_text(kOut), "plaintext 131079"));
     CHECK_EQ(run("inspect-file " + vault + "/objects/" + id + ".pvo"), 0);
     CHECK(contains(read_text(kOut), "format_version 1"));
     CHECK_EQ(run("decrypt " + vault + " " + id + " cli_out.bin --password-stdin", kPwFile), 0);

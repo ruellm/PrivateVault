@@ -339,3 +339,106 @@ Fallback: ops 3 / 128 MiB at 0.59 s per guess, half the memory, if 256 MiB turns
 large for a device in scope. The reader accepts the whole INTERACTIVE to MODERATE box, so
 changing the default later needs no format change; existing envelopes keep the parameters
 they were written with until the next PIN change rewraps them.
+
+## D-022 camera-video excluded on camera-view; V2 and V3a probe code deleted (2026-10-14, approved at the Phase 3B checkpoint)
+
+Choice (P3-10): `androidx.camera:camera-view:1.6.2` is kept and declared with an exclusion
+of `androidx.camera:camera-video`; the explicit debug dependency on `camera-video` is gone;
+`androidx.media3:media3-muxer:1.11.1` stays in the debug variant for the video prototype.
+The Phase 2 V2 probe (`Recorder` over a proxy file descriptor) and the V3a attempt (custom
+`VideoOutput`) were deleted because both need `camera-video`; their measurements remain in
+`docs/VIDEO_CAPTURE_FEASIBILITY.md`.
+
+Measured on the emulator (Milestone A): `PreviewView` binds and captures with the exclusion
+in place (8 verified captures through `CaptureActivity`), the V3b prototype still records
+and verifies, and the full T2 suite passes. Release and benchmark APKs define no media3 and
+no `androidx.camera.video` class (443 to 557 classes each before); benchmark shrinks from
+13 822 758 to 10 529 341 bytes. `com.google.guava:listenablefuture` now resolves to the
+real 1.0 artifact instead of the empty placeholder that guava had forced, and
+`ListenableFuture` is present in every APK.
+
+Alternatives: drop `camera-view` and draw the viewfinder through `Preview.setSurfaceProvider`
+into an own `SurfaceView` (brief 4.6.4). Not needed while `PreviewView` works without
+`camera-video`; it stays the fallback if the phone shows otherwise. Keeping `camera-video`
+only in debug was rejected because P3-10 removes it from every variant.
+
+## D-023 Orientation rule: the EXIF tag decides, the header rotation is the fallback (2026-10-14, approved at the Phase 3B checkpoint; the debug build logs a disagreement between the tag and the header)
+
+Measured on the emulator: CameraX writes an EXIF orientation tag into the in-memory JPEG that
+matches `ImageInfo.rotationDegrees`, which the item header stores (6 for 90, 8 for 270, 1 for
+0); `ImageDecoder` applies that tag by itself and `BitmapFactory` does not. On the Xiaomi
+(Phase 2) the HAL rotates the pixels and reports rotation 0; its tag is assumed to be 1 or
+absent until the phone probe runs.
+
+Choice: decode with `ImageDecoder`; if the JPEG carries an EXIF orientation other than 1,
+apply nothing more; if the tag is absent or 1, turn by the header `rotation_degrees`. One
+rule, never two turns, upright on both devices observed, and it covers a device that writes
+no tag. On a conflict the tag wins (the decoder has already applied it). The tag is read by a
+small own parser over the marker segments (D-026).
+
+Alternatives: always turn by the header rotation (turns the emulator photos twice: the
+decoder once, the app once); ignore the header and trust the decoder alone (leaves a device
+without EXIF sideways); decode with `BitmapFactory` and turn by the header only (gives up
+the target-size decode of `ImageDecoder` and would show a device that writes a tag but
+reports rotation 0 sideways).
+
+## D-024 Viewer buffers in guarded memory without a memory lock, no malloc fallback (2026-10-14, approved at the Phase 3B checkpoint)
+
+Measured on the emulator: `sodium_malloc` succeeds at 5 to 64 MiB; `mlock` on the block
+fails with `ENOMEM` because `RLIMIT_MEMLOCK` is 65 536 bytes (the phone reports the same
+limit). `sodium_malloc` ignores the refusal, so the block has guard pages, a canary, and a
+wipe on free, but is not locked.
+
+Choice: use `sodium_malloc` through `pv_secure_alloc` anyway, record in the threat model
+that the block is not locked, and report an allocation failure as `PV_ERR_OUT_OF_MEMORY`
+with no plain `malloc` fallback: both allocators fail on the same `mmap` failure, and a
+second free path would be a way to abort the process (`sodium_free` on a `malloc` block).
+
+Alternatives: raising `RLIMIT_MEMLOCK` is not possible for an app; a plain `malloc` plus
+`sodium_memzero` on free would lose the guard pages and the canary for nothing in return.
+
+## D-025 Viewer decrypts are cancelled by a flag the core polls, set inside Vault.close (2026-10-14, approved at the Phase 3B checkpoint)
+
+Choice: `pv_vault_decrypt_to_buffer` takes a pointer to a caller-owned flag and stops with
+`PV_ERR_CANCELLED` (wiping the buffer) when it is set between two chunks. On Android the
+flag is a JNI global that `Vault.close()` sets before taking the write side of its guard and
+clears after the handle is closed. A lock therefore ends a viewer decrypt within one chunk,
+and the flag is never set outside that window.
+
+Alternatives: let the lock wait for the decrypt (bounded by one object of at most 32 MiB,
+but a slowed test decrypt would hold the lock for the whole stream, and the brief asks for
+the result to be discarded); reuse the Phase 3A encrypt cancel flag (it is cleared when the
+capture queue empties, which can be before the viewer decrypt ends, and Phase 3A showed a
+process-wide flag that outlives the lock breaks later encrypts); a per-handle cancel in the
+core (changes the behaviour of existing functions for every caller).
+
+## D-026 No new Android dependency for the viewer (2026-10-14, approved at the Phase 3B checkpoint as amended)
+
+Choice: the gallery uses the platform `GridView`, the viewer a plain `View` with a `Matrix`,
+decoding uses `ImageDecoder`, and the EXIF orientation tag is read with the platform
+`android.media.ExifInterface(InputStream)` over an in-memory stream view of the payload
+buffer, the path the Milestone A probe used. The developer chose this over the proposed own
+sixty-line parser of the APP1 segment: one platform call instead of own parsing code, no
+dependency either way. The lint warning on that class is suppressed at the one call site.
+
+Alternatives: `androidx.recyclerview` (a new dependency for a grid the platform widget
+draws); the own parser (proposed, rejected by the developer); `androidx.exifinterface`
+(already in the APK through `camera-core`, but using a transitive artifact directly needs an
+explicit pin and a dependency record for one tag).
+
+## D-027 Heap investigation with the Android Studio profiler and heap dumps, Perfetto for native (2026-10-14, approved at the Phase 3B checkpoint as amended)
+
+Found in Milestone A: Android Studio on the machine was AI-242 (Ladybug Feature Drop), which
+cannot open the AGP 8.9 project; the phone runs Android 13, whose Perfetto (v25) offers Java
+heap graphs and native `heapprofd` but no Java allocation sampling (that starts with
+Android 14).
+
+Choice (developer): the developer updates Android Studio; its profiler records Java
+allocations with call stacks during the ten-capture burst on the debug build (route a), and
+`am dumpheap` before and after a forced collection shows retention. Fallback (route b):
+`am dumpheap`, `hprof-conv`, and the dump opened in Android Studio or Eclipse MAT.
+`heapprofd` gives the native callstacks for the native heap growth seen in Phase 2. Dumps
+and traces stay under `D:\pv-heap\`, outside the repository, and are deleted after analysis.
+
+Alternative proposed and rejected: an own Python HPROF reader for the retaining paths,
+which would have given retention but no allocation stacks.

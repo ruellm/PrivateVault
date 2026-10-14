@@ -36,7 +36,7 @@ class MainActivity : Activity(), LockController.Listener {
 
     // Actions that need the capture screen; the rest of the list goes with them.
     private val captureActions = setOf(
-        "capture_photo", "video_probe", "v2_probe", "flip", "memory", "test_hook_slow", "test_hook_clear"
+        "capture_photo", "video_probe", "flip", "memory", "test_hook_slow", "test_hook_clear", "wait"
     )
 
     private fun routeIfLocked(): Boolean {
@@ -72,6 +72,7 @@ class MainActivity : Activity(), LockController.Listener {
             })
         }
         button("Capture (camera)") { main.post { openCapture(emptyList()) } }
+        button("Gallery") { main.post { startActivity(Intent(this, GalleryActivity::class.java)) } }
         button("Encrypt 1 MB sample") { encrypt(1L shl 20) }
         button("Encrypt 100 MB sample") { encrypt(100L shl 20) }
         button("Verify all objects") { ObjectActions.verifyAll(vaults, ::say) }
@@ -132,21 +133,27 @@ class MainActivity : Activity(), LockController.Listener {
         val handoff = names.indexOfFirst { n -> captureActions.any { n == it || n.startsWith("${it}_n=") || n.startsWith("$it=") } }
         val local = if (handoff < 0) names else names.subList(0, handoff)
         for (name in local) {
-            val action: () -> Unit = when (name) {
-                "open" -> ::status
-                "encrypt_1mb" -> { { encrypt(1L shl 20) } }
-                "encrypt_100mb" -> { { encrypt(100L shl 20) } }
-                "verify", "verify_all" -> { { ObjectActions.verifyAll(vaults, ::say) } }
-                "list" -> { { ObjectActions.list(vaults, ::say) } }
-                "leak_scan" -> { { for (l in LeakScan.run(this).lines()) say(l) } }
-                "tamper" -> ::tamperTest
-                "truncation" -> ::truncationTest
-                "wrong_key" -> ::wrongKeyTest
-                "security_level" -> ::securityLevel
-                "kdf_bench" -> { { Diagnostics.kdfBench(::say) } }
-                "hmac_probe" -> { { Diagnostics.hmacProbe(this, ::say) } }
-                "lock" -> { { lock.lock("script"); say("lock state ${lock.state}") } }
-                "erase" -> { { say("erase: ${NativeBridge.errorName(lock.erase())}, lock state ${lock.state}") } }
+            val action: () -> Unit = when {
+                name == "open" -> ::status
+                name == "encrypt_1mb" -> { { encrypt(1L shl 20) } }
+                name == "encrypt_100mb" -> { { encrypt(100L shl 20) } }
+                name == "verify" || name == "verify_all" -> { { ObjectActions.verifyAll(vaults, ::say) } }
+                name == "list" -> { { ObjectActions.list(vaults, ::say) } }
+                name == "leak_scan" -> { { for (l in LeakScan.run(this).lines()) say(l) } }
+                name == "tamper" -> ::tamperTest
+                name == "truncation" -> ::truncationTest
+                name == "wrong_key" -> ::wrongKeyTest
+                name == "security_level" -> ::securityLevel
+                name == "kdf_bench" -> { { Diagnostics.kdfBench(::say) } }
+                name == "hmac_probe" -> { { Diagnostics.hmacProbe(this, ::say) } }
+                name == "lock" -> { { lock.lock("script"); say("lock state ${lock.state}") } }
+                name == "erase" -> { { say("erase: ${NativeBridge.errorName(lock.erase())}, lock state ${lock.state}") } }
+                // Phase 3B: the viewer pipeline over every object, the gallery
+                // screen, delete by ID, and a forced collection for the heap steps.
+                name == "view_all" -> { { ViewerActions.viewAll(vaults, ::say) } }
+                name == "gallery" -> { { main.post { startActivity(Intent(this, GalleryActivity::class.java)) } } }
+                name.startsWith("delete_object=") -> { { deleteObject(name.substringAfter('=')) } }
+                name == "gc" -> { { forceGc() } }
                 else -> { { say("unknown action $name") } }
             }
             run(name, action)
@@ -222,6 +229,19 @@ class MainActivity : Activity(), LockController.Listener {
     private fun encrypt(length: Long) {
         val id = requireVault().encryptSample(seed, length)
         say("encrypted $length bytes -> ${NativeBridge.hex(id)}")
+    }
+
+    private fun deleteObject(hex: String) {
+        if (hex.length != 32) {
+            say("delete_object: bad id")
+            return
+        }
+        val rc = requireVault().deleteObject(NativeBridge.fromHex(hex))
+        say("delete_object $hex: ${NativeBridge.errorName(rc)}")
+    }
+
+    private fun forceGc() {
+        say(HeapActions.gcLine())
     }
 
     // Encrypts a small object, damages one ciphertext byte, expects AUTH_FAILED,

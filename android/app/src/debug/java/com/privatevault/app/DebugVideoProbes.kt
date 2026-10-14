@@ -1,6 +1,5 @@
 package com.privatevault.app
 
-import android.content.Context
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaDataSource
@@ -8,14 +7,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.os.Bundle
 import android.os.Debug
-import android.os.Handler
-import android.os.HandlerThread
-import android.os.ParcelFileDescriptor
-import android.os.ProxyFileDescriptorCallback
 import android.os.StatFs
-import android.os.storage.StorageManager
-import android.system.ErrnoException
-import android.system.OsConstants
 import android.util.Size
 import android.view.Surface
 import androidx.camera.core.Camera
@@ -24,12 +16,6 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceRequest
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.video.FileDescriptorOutputOptions
-import androidx.camera.video.Recorder
-import androidx.camera.video.Recording
-import androidx.camera.video.VideoCapture
-import androidx.camera.video.VideoOutput
-import androidx.camera.video.VideoRecordEvent
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
@@ -46,10 +32,12 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 // Video feasibility prototype, debug variant only (docs/PHASE2_DESIGN.md
-// Section 8). Installed into VideoProbes by reflection from PvApp. Two
-// actions: video_probe (V3, encoder surface fed by CameraX, fragmented MP4
-// segments encrypted into the vault) and v2_probe (Recorder over a proxy file
-// descriptor, write pattern logged, nothing kept).
+// Section 8). Installed into VideoProbes by reflection from PvApp. One
+// action: video_probe (V3b, encoder surface fed by CameraX through the
+// Preview use case, fragmented MP4 segments encrypted into the vault). The
+// Phase 2 V2 probe (Recorder over a proxy file descriptor) and the V3a
+// attempt (custom VideoOutput) needed camera-video, which Stage 3B removed
+// from every variant; their results stay in docs/VIDEO_CAPTURE_FEASIBILITY.md.
 @Suppress("unused")
 @androidx.annotation.OptIn(UnstableApi::class)
 class DebugVideoProbes : VideoProbeRunner {
@@ -64,7 +52,7 @@ class DebugVideoProbes : VideoProbeRunner {
         val p = provider ?: throw IllegalStateException("camera provider not ready")
         when (name) {
             "video_probe" -> V3Probe(activity, p, lensFacing, vaults, say).run()
-            "v2_probe" -> V2Probe(activity, p, lensFacing, say).run()
+            else -> say("$name: not available in this build")
         }
         activity.rebindAndWait()
     }
@@ -96,9 +84,8 @@ class SegmentBuffer(private val capacity: Int) : WritableByteChannel {
     fun bytes(): ByteArray = out.toByteArray()
 }
 
-// V3: a custom VideoOutput hands CameraX a MediaCodec input surface. Only the
-// one abstract method of VideoOutput is implemented; the restricted default
-// methods are left alone (lint RestrictedApi is an error for this module).
+// V3b: the Preview use case hands CameraX a MediaCodec input surface through
+// its SurfaceProvider, so there is no on-screen viewfinder while recording.
 @androidx.annotation.OptIn(UnstableApi::class)
 class V3Probe(
     private val activity: CaptureActivity,
@@ -143,15 +130,12 @@ class V3Probe(
     private var stopReason: String? = null
     private val encryptExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "pv-video-encrypt") }
     private val encryptJobs = ArrayList<CountDownLatch>()
-    private var surfaceLatch = CountDownLatch(1)
-    private var variant = "V3a custom VideoOutput"
+    private val surfaceLatch = CountDownLatch(1)
+    private val variant = "V3b Preview with encoder SurfaceProvider, no on-screen preview"
     private var pssPeak = 0
     private var nativePeak = 0L
 
-    // The VideoOutput: creates the encoder at the requested resolution and
-    // provides its input surface.
-    private val output = VideoOutput { request -> onSurfaceRequested(request) }
-
+    // Creates the encoder at the requested resolution and provides its input surface.
     private fun onSurfaceRequested(request: SurfaceRequest) {
         try {
             val res = request.resolution
@@ -197,16 +181,10 @@ class V3Probe(
         sampler.start()
         var frameCount = 0
         try {
-            bind(withPreview = true)
+            bind()
             if (!surfaceLatch.await(5, TimeUnit.SECONDS) || encoder == null) {
-                say("video_probe: no surface request within 5 s with on-screen preview; trying V3b (encoder surface as Preview)")
-                variant = "V3b Preview with encoder SurfaceProvider, no on-screen preview"
-                surfaceLatch = CountDownLatch(1)
-                bind(withPreview = false)
-                if (!surfaceLatch.await(5, TimeUnit.SECONDS) || encoder == null) {
-                    say("video_probe: FAIL no encoder surface in either variant (${stopReason ?: "no request"})")
-                    return
-                }
+                say("video_probe: FAIL no encoder surface (${stopReason ?: "no request"})")
+                return
             }
             frameCount = drain(vault)
         } finally {
@@ -244,23 +222,16 @@ class V3Probe(
         say("video_probe: new non-object files after probe: ${fresh.size}${if (fresh.isNotEmpty()) " " + fresh.map { it.path } else ""}")
     }
 
-    private fun bind(withPreview: Boolean) {
+    private fun bind() {
         val latch = CountDownLatch(1)
         var error: String? = null
         activity.runOnUiThread {
             try {
                 provider.unbindAll()
                 val selector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
-                if (withPreview) {
-                    val preview = Preview.Builder().build()
-                    preview.surfaceProvider = activity.previewSurfaceProvider()
-                    val video = VideoCapture.withOutput(output)
-                    provider.bindToLifecycle(activity, selector, preview, video)
-                } else {
-                    val preview = Preview.Builder().build()
-                    preview.surfaceProvider = Preview.SurfaceProvider { request -> onSurfaceRequested(request) }
-                    provider.bindToLifecycle(activity, selector, preview)
-                }
+                val preview = Preview.Builder().build()
+                preview.surfaceProvider = Preview.SurfaceProvider { request -> onSurfaceRequested(request) }
+                provider.bindToLifecycle(activity, selector, preview)
             } catch (e: Exception) {
                 error = "${e.javaClass.simpleName}: ${e.message}"
             }
@@ -628,152 +599,5 @@ object SegmentVerify {
         } finally {
             extractor.release()
         }
-    }
-}
-
-// V2: CameraX Recorder writing to a proxy file descriptor whose callbacks keep
-// the data in memory and log every write. Probe only; the data is discarded.
-class V2Probe(
-    private val activity: CaptureActivity,
-    private val provider: ProcessCameraProvider,
-    private val lensFacing: Int,
-    private val say: (String) -> Unit
-) {
-    companion object {
-        const val CLIP_MS = 10_000L
-        const val MAX_BYTES = 16 shl 20
-    }
-
-    private class Write(val offset: Long, val size: Int)
-
-    private inner class Callback : ProxyFileDescriptorCallback() {
-        var data = ByteArray(1 shl 20)
-        var length = 0L
-        val writes = ArrayList<Write>()
-        var reads = 0
-        var fsyncs = 0
-        var backPatches = 0
-        var released = false
-        var overflow = false
-
-        override fun onGetSize(): Long = length
-
-        override fun onRead(offset: Long, size: Int, out: ByteArray): Int {
-            reads++
-            if (offset >= length) return 0
-            val n = minOf(size.toLong(), length - offset).toInt()
-            System.arraycopy(data, offset.toInt(), out, 0, n)
-            return n
-        }
-
-        override fun onWrite(offset: Long, size: Int, input: ByteArray): Int {
-            synchronized(writes) { writes.add(Write(offset, size)) }
-            if (offset < length) backPatches++
-            val end = offset + size
-            if (end > MAX_BYTES) {
-                overflow = true
-                throw ErrnoException("write", OsConstants.ENOSPC)
-            }
-            if (end > data.size) {
-                var cap = data.size
-                while (cap < end) cap *= 2
-                data = data.copyOf(minOf(cap, MAX_BYTES))
-            }
-            System.arraycopy(input, 0, data, offset.toInt(), size)
-            if (end > length) length = end
-            return size
-        }
-
-        override fun onFsync() {
-            fsyncs++
-        }
-
-        override fun onRelease() {
-            released = true
-            data.fill(0)
-        }
-    }
-
-    fun run() {
-        val before = LeakScan.run(activity)
-        val sm = activity.getSystemService(Context.STORAGE_SERVICE) as StorageManager
-        val thread = HandlerThread("pv-proxyfd").apply { start() }
-        val cb = Callback()
-        val pfd: ParcelFileDescriptor
-        try {
-            pfd = sm.openProxyFileDescriptor(ParcelFileDescriptor.MODE_READ_WRITE, cb, Handler(thread.looper))
-        } catch (e: Exception) {
-            say("v2_probe: openProxyFileDescriptor failed: ${e.javaClass.simpleName}: ${e.message}")
-            thread.quitSafely()
-            return
-        }
-        say("v2_probe: proxy descriptor opened (fd ${pfd.fd})")
-        val recorder = Recorder.Builder().build()
-        val videoCapture = VideoCapture.withOutput(recorder)
-        val bindLatch = CountDownLatch(1)
-        var bindError: String? = null
-        activity.runOnUiThread {
-            try {
-                provider.unbindAll()
-                val preview = Preview.Builder().build()
-                preview.surfaceProvider = activity.previewSurfaceProvider()
-                val selector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
-                provider.bindToLifecycle(activity, selector, preview, videoCapture)
-            } catch (e: Exception) {
-                bindError = "${e.javaClass.simpleName}: ${e.message}"
-            }
-            bindLatch.countDown()
-        }
-        bindLatch.await(10, TimeUnit.SECONDS)
-        if (bindError != null) {
-            say("v2_probe: bind failed: $bindError")
-            pfd.close()
-            thread.quitSafely()
-            return
-        }
-        val finalize = CountDownLatch(1)
-        var finalStatus = "no finalize event"
-        var started = false
-        val options = FileDescriptorOutputOptions.Builder(pfd).build()
-        val recording: Recording = recorder.prepareRecording(activity, options)
-            .start(activity.mainExecutor) { event ->
-                when (event) {
-                    is VideoRecordEvent.Start -> {
-                        started = true
-                        say("v2_probe: recording started")
-                    }
-                    is VideoRecordEvent.Finalize -> {
-                        finalStatus = "finalize error=${event.error} ${event.cause?.message ?: ""} " +
-                            "bytes=${event.recordingStats.numBytesRecorded} duration=${event.recordingStats.recordedDurationNanos / 1_000_000}ms"
-                        finalize.countDown()
-                    }
-                    else -> {}
-                }
-            }
-        Thread.sleep(CLIP_MS)
-        recording.stop()
-        finalize.await(20, TimeUnit.SECONDS)
-        try {
-            activity.runOnUiThread { provider.unbindAll() }
-        } catch (e: Exception) {
-        }
-        pfd.close()
-        Thread.sleep(500)
-        thread.quitSafely()
-        say("v2_probe: started=$started $finalStatus")
-        val writes = synchronized(cb.writes) { ArrayList(cb.writes) }
-        say("v2_probe: writes=${writes.size} total_bytes=${writes.sumOf { it.size.toLong() }} final_length=${cb.length} " +
-            "back_patches=${cb.backPatches} reads=${cb.reads} fsyncs=${cb.fsyncs} released=${cb.released} overflow=${cb.overflow}")
-        val shown = writes.take(12).joinToString(" ") { "${it.offset}+${it.size}" }
-        say("v2_probe: first writes (offset+size): $shown")
-        val patches = writes.withIndex().filter { (i, w) -> i > 0 && w.offset < writes.take(i).maxOf { it.offset + it.size } }
-        say("v2_probe: writes below the end so far: ${patches.take(12).joinToString(" ") { "#${it.index}@${it.value.offset}+${it.value.size}" }}")
-        val head = cb.data.copyOf(minOf(16, cb.length.toInt()))
-        say("v2_probe: first bytes ${NativeBridge.hex(head)} (ftyp=${cb.length >= 8 && String(cb.data, 4, 4, Charsets.US_ASCII) == "ftyp"})")
-        cb.data.fill(0)
-        val after = LeakScan.run(activity)
-        for (l in after.lines()) say("v2_probe: $l")
-        val fresh = LeakScan.newEntries(before, after)
-        say("v2_probe: new files after probe: ${fresh.size}${if (fresh.isNotEmpty()) " " + fresh.map { it.path } else ""}")
     }
 }

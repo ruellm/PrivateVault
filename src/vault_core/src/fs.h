@@ -39,6 +39,13 @@ int remove_dir(const std::string& path);
 // Names of the entries in dir, without "." and "..".
 int list_dir(const std::string& dir, std::vector<std::string>& names);
 
+// Length of a file in bytes. Missing: PV_ERR_NOT_FOUND.
+int file_size(const std::string& path, uint64_t* out);
+
+// Flushes directory metadata after an unlink or rename where the platform
+// needs it (POSIX). No-op on Windows.
+void sync_dir(const std::string& dir);
+
 std::string join(const std::string& dir, const std::string& name);
 
 // Records the platform error of a failed call for pv_last_os_error().

@@ -339,6 +339,14 @@ int inspect_path(const std::string& path) {
         return fail(rc);
     }
     print_info(info);
+    // Plaintext length from the file length; needs no key.
+    uint64_t plain = 0;
+    rc = pv_object_plaintext_size_file(path.c_str(), &plain);
+    if (rc == PV_OK) {
+        std::printf("plaintext %llu\n", static_cast<unsigned long long>(plain));
+    } else {
+        std::printf("plaintext %s\n", pv_error_name(rc));
+    }
     return 0;
 }
 

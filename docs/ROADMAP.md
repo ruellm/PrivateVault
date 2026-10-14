@@ -6,8 +6,9 @@ Condensed from `PROJECT_HANDOFF.md` Section 3. Phase 2 is the active phase.
 |---|---|---|
 | 1 | Encrypted storage core (C++20, libsodium), desktop CLI, Android proof of concept, tests, documentation | Complete |
 | 2 | In-app photo capture written straight into encrypted objects; plaintext exposure audit; video feasibility prototype | Active |
-| 3A | PIN lock, PIN-derived vault key (envelope provider 3), migration, lock rules, attempt delays, erase (`docs/PHASE3A_DESIGN.md`) | Done on Windows and the emulator; T3 on the Xiaomi open |
-| 3B to 3E | Photo viewer and delete, dependency cleanup, video groundwork, playback, capture | Not started |
+| 3A | PIN lock, PIN-derived vault key (envelope provider 3), migration, lock rules, attempt delays, erase (`docs/PHASE3A_DESIGN.md`) | Complete |
+| 3B | Photo gallery and viewer, delete one photo, camera-video removed from every variant, heap investigation (`docs/PHASE3B_DESIGN.md`) | Active: Milestone B design at the checkpoint |
+| 3C to 3E | Video groundwork, playback, capture | Not started |
 | Video | Full video capture: viewfinder mirror, native segment buffering, index and recovery rules, audio; recommended as its own phase or the second half of Phase 3 (`docs/VIDEO_CAPTURE_FEASIBILITY.md` Section 6) | Not started |
 | 4 | Temporal interference experiment against external cameras; measured, not promised | Not started |
 | 5 | Permission-based sharing between devices, streaming from the source device, revocation, local access log | Not started |
@@ -19,6 +20,12 @@ Seams left in Phase 1 for later phases:
 - Per-object data keys wrapped by the vault master key allow Phase 5 per-object sharing and Phase 6 per-object erasure.
 - The core takes the vault master key as bytes, so new key providers (iOS Keychain, recovery schemes) do not touch the object format.
 - The C ABI is the only surface platforms use, so an iOS client can call it from Swift.
+
+Hardening items recorded for Phase 6:
+
+- R8 (minify and shrink) for the release and benchmark variants, with keep rules for the JNI
+  entry points of `NativeBridge`, the reflection in `PvApp`, and the CameraX consumer rules;
+  measure APK size and startup before and after (Stage 3B checkpoint, CP-8).
 
 Seams left in Phase 2:
 
