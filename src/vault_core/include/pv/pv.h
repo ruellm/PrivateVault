@@ -41,6 +41,9 @@ extern "C" {
 // not a corruption: callers that accept non-item objects treat it as an
 // "unknown item". The object itself decrypted and authenticated normally.
 #define PV_ERR_NOT_ITEM 23
+// A provider 3 envelope that parsed but holds no slot this reader can use
+// (Phase 3A). See docs/PHASE3A_DESIGN.md Section 2.
+#define PV_ERR_ENVELOPE_NO_SLOT 24
 
 // Sizes fixed by the format. Key sizes equal the libsodium constants; the
 // core checks that at compile time.
@@ -226,6 +229,100 @@ void pv_source_memory_free(pv_source* s);
 int pv_sink_item_new(pv_sink* payload_sink, void (*payload_abort)(pv_sink*), pv_sink* out);
 int pv_sink_item_finish(pv_sink* s, uint64_t plaintext_len, pv_item_header* header_out);
 void pv_sink_item_abort(pv_sink* s);
+
+// PIN stretching (Phase 3A, docs/PHASE3A_DESIGN.md Section 3). Argon2id over
+// the PIN bytes. opslimit and memlimit are checked against the range below
+// before any memory is requested; out of range gives PV_ERR_ENVELOPE_KDF_PARAMS.
+// The range equals the libsodium INTERACTIVE to MODERATE presets. salt_len
+// must be PV_PIN_SALT_BYTES and out_len PV_KEK_BYTES. The caller wipes pin
+// and out when done.
+#define PV_PIN_SALT_BYTES 16
+#define PV_KEK_BYTES 32
+#define PV_PIN_OPSLIMIT_MIN 2u
+#define PV_PIN_OPSLIMIT_MAX 3u
+#define PV_PIN_MEMLIMIT_MIN (64u * 1024u * 1024u)
+#define PV_PIN_MEMLIMIT_MAX (256u * 1024u * 1024u)
+// Parameters a new envelope is written with. Provisional until the phone
+// measurement (design Section 3.4).
+#define PV_PIN_OPSLIMIT_DEFAULT 3u
+#define PV_PIN_MEMLIMIT_DEFAULT (64u * 1024u * 1024u)
+
+int pv_pin_stretch(const uint8_t* pin, size_t pin_len, const uint8_t* salt, size_t salt_len,
+                   uint64_t opslimit, uint64_t memlimit, uint8_t* out, size_t out_len);
+// Fills out with PV_PIN_SALT_BYTES random bytes. out_len must equal that.
+int pv_pin_salt_generate(uint8_t* out, size_t out_len);
+
+// Wrong-PIN delay arithmetic (design Section 8). delay_ms: the wait after
+// `failures` consecutive wrong PINs: 0 below 5, then 30 s doubling per
+// failure, capped at 3600 s. remaining_ms: how much of delay_ms is left.
+// Two estimates are made, one from the elapsed clock and one from the wall
+// clock (a clock that went backwards counts as the whole delay); on the same
+// boot the larger one is returned, after a reboot the whole delay.
+uint64_t pv_pin_delay_ms(uint32_t failures);
+uint64_t pv_pin_remaining_ms(uint64_t delay_ms, uint64_t fail_elapsed_ms, uint64_t now_elapsed_ms,
+                             int64_t fail_wall_ms, int64_t now_wall_ms, int boot_changed);
+
+// Key envelope provider 3: the VMK wrapped under a key derived from a PIN and
+// a device-bound key. Layout in docs/PHASE3A_DESIGN.md Section 2. The
+// envelope holds slots; a PIN slot carries the mechanism of the device-bound
+// step, the platform alias of that key, the Argon2id parameters, salt, nonce,
+// and the wrapped VMK. Unknown slot types are skipped. The additional data
+// of every slot is the whole envelope with each wrapped field zeroed.
+#define PV_ENVELOPE_PROVIDER_PIN 3
+#define PV_SLOT_PIN 1
+#define PV_SLOT_BIOMETRIC 2
+#define PV_MECHANISM_ANDROID_KEYSTORE_HMAC 1
+#define PV_ENVELOPE_ALIAS_MAX 64
+#define PV_ENVELOPE3_MAX_BYTES 4096
+#define PV_ENVELOPE3_MAX_SLOTS 8
+
+typedef struct pv_envelope3_params {
+    uint16_t mechanism;
+    char alias[PV_ENVELOPE_ALIAS_MAX + 1];
+    uint32_t opslimit;
+    uint64_t memlimit;
+    uint8_t salt[PV_PIN_SALT_BYTES];
+} pv_envelope3_params;
+
+typedef struct pv_envelope3_info {
+    uint16_t version;
+    uint16_t provider_id;
+    uint16_t slot_count;
+    uint16_t pin_slot_count;
+    uint16_t unknown_slot_count;
+    uint16_t pin_slot_index;
+    pv_envelope3_params pin;
+} pv_envelope3_info;
+
+// parse checks the structure and the KDF range of the first PIN slot and
+// reports its fields; it runs no KDF and requests no memory. Codes:
+// PV_ERR_ENVELOPE_MALFORMED, PV_ERR_ENVELOPE_UNSUPPORTED (version, or a
+// provider other than 3), PV_ERR_ENVELOPE_NO_SLOT, PV_ERR_ENVELOPE_KDF_PARAMS.
+int pv_envelope3_parse(const uint8_t* buf, size_t len, pv_envelope3_info* out);
+// seal writes a one-slot envelope for vmk under kek. open recovers the VMK
+// from the first PIN slot; wrong kek or a modified byte gives
+// PV_ERR_ENVELOPE_UNWRAP_FAILED. open exists for tests and the vector
+// generator; platforms use the vault forms below so the VMK stays inside.
+int pv_envelope3_seal(const uint8_t* vmk, size_t vmk_len, const pv_envelope3_params* p,
+                      const uint8_t* kek, size_t kek_len, uint8_t* out, size_t out_cap,
+                      size_t* out_len);
+int pv_envelope3_open(const uint8_t* buf, size_t len, const uint8_t* kek, size_t kek_len,
+                      uint8_t* vmk_out, size_t vmk_out_len);
+
+// Vault forms. create makes dir and dir/objects, refuses an existing
+// vault.key (PV_ERR_DEST_EXISTS), generates the VMK, writes the envelope, and
+// returns the open handle. open removes a stale vault.key.partial, reads
+// vault.key, unwraps, and opens. write rewraps the VMK of an open vault into
+// a new envelope through vault.key.partial and a rename over vault.key.
+// destroy_files deletes vault.key, its partial, everything in objects/, and
+// both directories; a missing directory is not an error.
+int pv_vault_create_envelope3(const char* vault_dir, const pv_envelope3_params* p,
+                              const uint8_t* kek, size_t kek_len, pv_vault** out);
+int pv_vault_open_envelope3(const char* vault_dir, const uint8_t* kek, size_t kek_len,
+                            pv_vault** out);
+int pv_vault_write_envelope3(pv_vault* v, const pv_envelope3_params* p, const uint8_t* kek,
+                             size_t kek_len);
+int pv_vault_destroy_files(const char* vault_dir);
 
 #ifdef __cplusplus
 }

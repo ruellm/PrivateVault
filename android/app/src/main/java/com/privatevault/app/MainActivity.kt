@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.View
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -14,11 +15,12 @@ import android.widget.TextView
 import java.io.RandomAccessFile
 import java.util.concurrent.Executors
 
-// Minimal proof-of-concept screen. Every action runs on a worker thread and
-// prints a line with pass or fail. Nothing shown or logged is a key, a
-// password, or capture content; object IDs, item fields, and hashes of
-// synthetic data are the only values printed.
-class MainActivity : Activity() {
+// The vault screen, reachable only while the vault is unlocked. Every action
+// runs on a worker thread and prints a line with pass or fail. Nothing shown
+// or logged is a key, a PIN, or capture content; object IDs, item fields,
+// and hashes of synthetic data are the only values printed. Not exported:
+// scripted actions reach it through the debug-only ScriptActivity.
+class MainActivity : Activity(), LockController.Listener {
 
     private val executor = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
@@ -26,6 +28,8 @@ class MainActivity : Activity() {
     private lateinit var scroll: ScrollView
     private val vaults: VaultSession by lazy { PvApp.of(this).vaultSession }
     private val provider: KeystoreKeyProvider get() = vaults.provider
+    private val lock: LockController get() = PvApp.of(this).lock
+    private var started = false
 
     // Public test seed; the same stream the host tests use.
     private val seed = "PRIVATEVAULT TEST ONLY SEED 0001".toByteArray(Charsets.US_ASCII)
@@ -35,8 +39,27 @@ class MainActivity : Activity() {
         "capture_photo", "video_probe", "v2_probe", "flip", "memory", "test_hook_slow", "test_hook_clear"
     )
 
+    private fun routeIfLocked(): Boolean {
+        if (lock.state == LockState.UNLOCKED) return false
+        startActivity(Intent(this, LockActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP))
+        finish()
+        return true
+    }
+
+    override fun onLockStateChanged(state: LockState) {
+        if (started && state != LockState.UNLOCKED && !isFinishing) routeIfLocked()
+    }
+
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        lock.touch()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+        if (routeIfLocked()) return
+        lock.addListener(this)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 24, 24, 24)
@@ -48,7 +71,6 @@ class MainActivity : Activity() {
                 setOnClickListener { run(label, action) }
             })
         }
-        button("Create or open vault") { createOrOpen() }
         button("Capture (camera)") { main.post { openCapture(emptyList()) } }
         button("Encrypt 1 MB sample") { encrypt(1L shl 20) }
         button("Encrypt 100 MB sample") { encrypt(100L shl 20) }
@@ -59,7 +81,9 @@ class MainActivity : Activity() {
         button("Truncation test") { truncationTest() }
         button("Wrong key test") { wrongKeyTest() }
         button("Keystore security level") { securityLevel() }
-        button("Close vault") { closeVault() }
+        button("Lock") { lock.lock("manual") }
+        button("Change PIN") { main.post { startActivity(Intent(this, LockActivity::class.java).putExtra(LockActivity.EXTRA_MODE, LockActivity.MODE_CHANGE)) } }
+        button("Erase vault") { main.post { startActivity(Intent(this, LockActivity::class.java).putExtra(LockActivity.EXTRA_MODE, LockActivity.MODE_ERASE)) } }
 
         log = TextView(this).apply { setTextIsSelectable(true) }
         scroll = ScrollView(this).apply { addView(log) }
@@ -72,15 +96,24 @@ class MainActivity : Activity() {
         root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1.5f))
         setContentView(root)
 
-        val init = NativeBridge.nativeInit()
         say(
             "core ${NativeBridge.nativeVersion()}, libsodium ${NativeBridge.nativeSodiumVersion()}, " +
-                "pv_init ${NativeBridge.errorName(init)}"
+                "lock state ${lock.state}, unlock took ${lock.lastUnlockMs} ms"
         )
-        say("vault present: ${Vault.exists(filesDir)}; Keystore key present: ${provider.keyExists()}")
-        say("secure lock screen: ${provider.deviceIsSecure()}; key mode: ${provider.keyMode()}")
-        say("Uninstall, Clear Data, or a factory reset destroys the Keystore key and the vault.")
+        say(lock.describeKey())
+        say("objects in vault: ${vaults.vault?.listObjectIds()?.size ?: -1}")
         handleScriptedActions(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        started = true
+        routeIfLocked()
+    }
+
+    override fun onStop() {
+        started = false
+        super.onStop()
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -88,10 +121,11 @@ class MainActivity : Activity() {
         handleScriptedActions(intent)
     }
 
-    // Scripted driving for the T3 device steps (debug proof of concept only):
-    //   adb shell am start -n com.privatevault.app/.MainActivity --es actions open,encrypt_1mb,verify
-    // Actions run in order on the worker thread and print to the log and logcat.
-    // A capture action hands itself and everything after it to CaptureActivity.
+    // Scripted driving for the T2 and T3 steps (D-009, D-019). The list comes
+    // from ScriptActivity in the debug variant, which has already unlocked.
+    // Actions run in order on the worker thread and print to the log and
+    // logcat. A capture action hands itself and everything after it to
+    // CaptureActivity.
     private fun handleScriptedActions(intent: Intent?) {
         val list = intent?.getStringExtra("actions") ?: return
         val names = list.split(',').map { it.trim() }.filter { it.isNotEmpty() }
@@ -99,7 +133,7 @@ class MainActivity : Activity() {
         val local = if (handoff < 0) names else names.subList(0, handoff)
         for (name in local) {
             val action: () -> Unit = when (name) {
-                "open" -> ::createOrOpen
+                "open" -> ::status
                 "encrypt_1mb" -> { { encrypt(1L shl 20) } }
                 "encrypt_100mb" -> { { encrypt(100L shl 20) } }
                 "verify", "verify_all" -> { { ObjectActions.verifyAll(vaults, ::say) } }
@@ -109,7 +143,10 @@ class MainActivity : Activity() {
                 "truncation" -> ::truncationTest
                 "wrong_key" -> ::wrongKeyTest
                 "security_level" -> ::securityLevel
-                "close" -> ::closeVault
+                "kdf_bench" -> { { Diagnostics.kdfBench(::say) } }
+                "hmac_probe" -> { { Diagnostics.hmacProbe(this, ::say) } }
+                "lock" -> { { lock.lock("script"); say("lock state ${lock.state}") } }
+                "erase" -> { { say("erase: ${NativeBridge.errorName(lock.erase())}, lock state ${lock.state}") } }
                 else -> { { say("unknown action $name") } }
             }
             run(name, action)
@@ -129,15 +166,18 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        super.onDestroy()
+        lock.removeListener(this)
         executor.shutdown()
+        super.onDestroy()
     }
 
     private fun say(line: String) {
         Log.i("PrivateVault", line)
         main.post {
-            log.append(line + "\n")
-            scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+            if (this::log.isInitialized) {
+                log.append(line + "\n")
+                scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+            }
         }
     }
 
@@ -173,9 +213,9 @@ class MainActivity : Activity() {
 
     private fun requireVault(): Vault = vaults.vault ?: throw IllegalStateException("vault not open")
 
-    private fun createOrOpen() {
-        say(vaults.openOrCreate())
-        say(provider.describe())
+    private fun status() {
+        say("vault open: ${vaults.vault != null}, lock state ${lock.state}, kind ${lock.vaultKind()}")
+        say(lock.describeKey())
         say("objects in vault: ${requireVault().listObjectIds().size}")
     }
 
@@ -235,14 +275,9 @@ class MainActivity : Activity() {
     }
 
     private fun securityLevel() {
-        provider.getOrCreateKey()
         say("secure lock screen: ${provider.deviceIsSecure()}")
-        say(provider.describe())
+        say(lock.describeKey())
+        say("provider 2 key present: ${provider.keyExists()}")
         say("link() in filesDir: ${NativeBridge.nativeProbeLink(filesDir.absolutePath).let { if (it == 0) "allowed" else "denied (errno $it)" }}")
-    }
-
-    private fun closeVault() {
-        vaults.close()
-        say("vault closed")
     }
 }

@@ -124,11 +124,16 @@ bool fill_header(JNIEnv* env, jlongArray fields, uint64_t payload_len, pv_item_h
     return true;
 }
 
+// Every encrypt source passes through this wrapper. In all variants it
+// checks the cancel flag that the lock sets, so an encrypt in flight fails at
+// its next read and the core removes the partial object. The debug variant
+// adds a sleep per read and a read failure after a byte count, both off (0)
+// unless a test sets them.
+std::atomic<bool> g_cancel_encrypts{false};
 #ifdef PV_DEBUG_HOOKS
-// Test hooks, debug variant only: a sleep per source read and a read failure
-// after a byte count. Both off (0) unless a test sets them.
 std::atomic<int> g_slow_read_ms{0};
 std::atomic<long long> g_fail_after_bytes{0};
+#endif
 
 struct HookedSource {
     pv_source inner;
@@ -137,6 +142,10 @@ struct HookedSource {
 
 int hooked_read(void* ctx, uint8_t* buf, size_t cap, size_t* out_n) {
     HookedSource* h = static_cast<HookedSource*>(ctx);
+    if (g_cancel_encrypts.load()) {
+        return -1;
+    }
+#ifdef PV_DEBUG_HOOKS
     int ms = g_slow_read_ms.load();
     if (ms > 0) {
         ::usleep(static_cast<useconds_t>(ms) * 1000);
@@ -145,13 +154,41 @@ int hooked_read(void* ctx, uint8_t* buf, size_t cap, size_t* out_n) {
     if (limit > 0 && h->delivered >= limit) {
         return -1;
     }
+#endif
     int rc = h->inner.read(h->inner.ctx, buf, cap, out_n);
     if (rc == 0) {
         h->delivered += static_cast<long long>(*out_n);
     }
     return rc;
 }
-#endif
+
+// Fills p from the Kotlin-side pieces of an envelope 3 parameter set.
+bool fill_params(JNIEnv* env, jint mechanism, jstring alias, jlong opslimit, jlong memlimit,
+                 jbyteArray salt, pv_envelope3_params* p) {
+    std::memset(p, 0, sizeof(*p));
+    std::string a = to_utf8(env, alias);
+    if (mechanism < 0 || mechanism > 0xffff || a.empty() || a.size() > PV_ENVELOPE_ALIAS_MAX ||
+        opslimit < 0 || memlimit < 0) {
+        return false;
+    }
+    std::vector<uint8_t> s;
+    if (!copy_bytes(env, salt, PV_PIN_SALT_BYTES, s)) {
+        return false;
+    }
+    p->mechanism = static_cast<uint16_t>(mechanism);
+    std::memcpy(p->alias, a.data(), a.size());
+    p->opslimit = static_cast<uint32_t>(opslimit);
+    p->memlimit = static_cast<uint64_t>(memlimit);
+    std::memcpy(p->salt, s.data(), PV_PIN_SALT_BYTES);
+    return true;
+}
+
+void put_handle(JNIEnv* env, jlongArray handle_out, pv_vault* v) {
+    if (handle_out && env->GetArrayLength(handle_out) >= 1) {
+        jlong h = static_cast<jlong>(reinterpret_cast<intptr_t>(v));
+        env->SetLongArrayRegion(handle_out, 0, 1, &h);
+    }
+}
 
 // Encrypts [48-byte item header, payload bytes at data] into a new object.
 int encrypt_item(JNIEnv* env, jlong handle, const uint8_t* data, size_t len, jlongArray fields,
@@ -174,14 +211,10 @@ int encrypt_item(JNIEnv* env, jlong handle, const uint8_t* data, size_t len, jlo
     if (rc != PV_OK) {
         return rc;
     }
-    pv_source* used = &src;
-#ifdef PV_DEBUG_HOOKS
     HookedSource hooked{src, 0};
     pv_source hooked_src{&hooked, hooked_read};
-    used = &hooked_src;
-#endif
     uint8_t id[PV_OBJECT_ID_BYTES];
-    rc = pv_vault_encrypt(handle_to_vault(handle), used, 0, id);
+    rc = pv_vault_encrypt(handle_to_vault(handle), &hooked_src, 0, id);
     pv_source_memory_free(&src);
     if (rc == PV_OK) {
         put_bytes(env, id_out, id, sizeof(id));
@@ -346,14 +379,10 @@ Java_com_privatevault_app_NativeBridge_nativeEncryptSample(JNIEnv* env, jclass, 
     if (rc != PV_OK) {
         return rc;
     }
-    pv_source* used = &src;
-#ifdef PV_DEBUG_HOOKS
     HookedSource hooked{src, 0};
     pv_source hooked_src{&hooked, hooked_read};
-    used = &hooked_src;
-#endif
     uint8_t id[PV_OBJECT_ID_BYTES];
-    rc = pv_vault_encrypt(handle_to_vault(handle), used, static_cast<uint32_t>(chunk_size), id);
+    rc = pv_vault_encrypt(handle_to_vault(handle), &hooked_src, static_cast<uint32_t>(chunk_size), id);
     pv_source_deterministic_free(&src);
     if (rc == PV_OK) {
         put_bytes(env, id_out, id, sizeof(id));
@@ -641,6 +670,160 @@ Java_com_privatevault_app_NativeBridge_nativeProbeLink(JNIEnv* env, jclass, jstr
     ::unlink(a.c_str());
     ::unlink(b.c_str());
     return result;
+}
+
+// Phase 3A: Argon2id over the PIN bytes. The PIN copy is wiped when the
+// function returns; the Kotlin side wipes its own array.
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativePinStretch(JNIEnv* env, jclass, jbyteArray pin,
+                                                        jbyteArray salt, jlong opslimit,
+                                                        jlong memlimit, jbyteArray out) {
+    KeyCopy p;
+    std::vector<uint8_t> s;
+    if (!copy_bytes(env, pin, 0, p.bytes) || !copy_bytes(env, salt, PV_PIN_SALT_BYTES, s) ||
+        opslimit < 0 || memlimit < 0 || !out || env->GetArrayLength(out) != PV_KEK_BYTES) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    uint8_t kek[PV_KEK_BYTES];
+    int rc = pv_pin_stretch(p.bytes.data(), p.bytes.size(), s.data(), s.size(),
+                            static_cast<uint64_t>(opslimit), static_cast<uint64_t>(memlimit),
+                            kek, sizeof(kek));
+    if (rc == PV_OK) {
+        put_bytes(env, out, kek, sizeof(kek));
+    }
+    sodium_memzero(kek, sizeof(kek));
+    return rc;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativePinSaltGenerate(JNIEnv* env, jclass, jbyteArray out) {
+    if (!out || env->GetArrayLength(out) != PV_PIN_SALT_BYTES) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    uint8_t salt[PV_PIN_SALT_BYTES];
+    int rc = pv_pin_salt_generate(salt, sizeof(salt));
+    if (rc == PV_OK) {
+        put_bytes(env, out, salt, sizeof(salt));
+    }
+    return rc;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_privatevault_app_NativeBridge_nativePinDelayMs(JNIEnv*, jclass, jint failures) {
+    if (failures < 0) {
+        return 0;
+    }
+    return static_cast<jlong>(pv_pin_delay_ms(static_cast<uint32_t>(failures)));
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_privatevault_app_NativeBridge_nativePinRemainingMs(JNIEnv*, jclass, jlong delay_ms,
+                                                            jlong fail_elapsed_ms,
+                                                            jlong now_elapsed_ms,
+                                                            jlong fail_wall_ms, jlong now_wall_ms,
+                                                            jboolean boot_changed) {
+    if (delay_ms < 0 || fail_elapsed_ms < 0 || now_elapsed_ms < 0) {
+        return 0;
+    }
+    return static_cast<jlong>(pv_pin_remaining_ms(
+        static_cast<uint64_t>(delay_ms), static_cast<uint64_t>(fail_elapsed_ms),
+        static_cast<uint64_t>(now_elapsed_ms), fail_wall_ms, now_wall_ms,
+        boot_changed ? 1 : 0));
+}
+
+// Parses an envelope. infoOut = [version, provider, slot_count, pin_slot_count,
+// unknown_slot_count, pin_slot_index, mechanism, opslimit, memlimit];
+// saltOut gets the salt; aliasOut[0] the alias. Returns the parse status.
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeEnvelope3Parse(JNIEnv* env, jclass,
+                                                            jbyteArray envelope,
+                                                            jlongArray info_out,
+                                                            jbyteArray salt_out,
+                                                            jobjectArray alias_out) {
+    std::vector<uint8_t> e;
+    if (!copy_bytes(env, envelope, 0, e) || !info_out || env->GetArrayLength(info_out) < 9 ||
+        !salt_out || env->GetArrayLength(salt_out) != PV_PIN_SALT_BYTES || !alias_out ||
+        env->GetArrayLength(alias_out) < 1) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    pv_envelope3_info info{};
+    // An empty array is an empty envelope, not a missing argument.
+    uint8_t none = 0;
+    int rc = pv_envelope3_parse(e.empty() ? &none : e.data(), e.size(), &info);
+    if (rc != PV_OK) {
+        return rc;
+    }
+    jlong vals[9] = {info.version, info.provider_id, info.slot_count, info.pin_slot_count,
+                     info.unknown_slot_count, info.pin_slot_index, info.pin.mechanism,
+                     static_cast<jlong>(info.pin.opslimit), static_cast<jlong>(info.pin.memlimit)};
+    env->SetLongArrayRegion(info_out, 0, 9, vals);
+    put_bytes(env, salt_out, info.pin.salt, PV_PIN_SALT_BYTES);
+    env->SetObjectArrayElement(alias_out, 0, env->NewStringUTF(info.pin.alias));
+    return PV_OK;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeVaultCreateEnvelope3(
+    JNIEnv* env, jclass, jstring dir, jint mechanism, jstring alias, jlong opslimit,
+    jlong memlimit, jbyteArray salt, jbyteArray kek, jlongArray handle_out) {
+    put_handle(env, handle_out, nullptr);
+    pv_envelope3_params p{};
+    KeyCopy k;
+    if (!fill_params(env, mechanism, alias, opslimit, memlimit, salt, &p) ||
+        !copy_bytes(env, kek, PV_KEK_BYTES, k.bytes)) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    std::string d = to_utf8(env, dir);
+    pv_vault* v = nullptr;
+    int rc = pv_vault_create_envelope3(d.c_str(), &p, k.bytes.data(), k.bytes.size(), &v);
+    if (rc == PV_OK) {
+        put_handle(env, handle_out, v);
+    }
+    return rc;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeVaultOpenEnvelope3(JNIEnv* env, jclass, jstring dir,
+                                                                jbyteArray kek,
+                                                                jlongArray handle_out) {
+    put_handle(env, handle_out, nullptr);
+    KeyCopy k;
+    if (!copy_bytes(env, kek, PV_KEK_BYTES, k.bytes)) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    std::string d = to_utf8(env, dir);
+    pv_vault* v = nullptr;
+    int rc = pv_vault_open_envelope3(d.c_str(), k.bytes.data(), k.bytes.size(), &v);
+    if (rc == PV_OK) {
+        put_handle(env, handle_out, v);
+    }
+    return rc;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeVaultWriteEnvelope3(
+    JNIEnv* env, jclass, jlong handle, jint mechanism, jstring alias, jlong opslimit,
+    jlong memlimit, jbyteArray salt, jbyteArray kek) {
+    pv_envelope3_params p{};
+    KeyCopy k;
+    if (!fill_params(env, mechanism, alias, opslimit, memlimit, salt, &p) ||
+        !copy_bytes(env, kek, PV_KEK_BYTES, k.bytes)) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    return pv_vault_write_envelope3(handle_to_vault(handle), &p, k.bytes.data(), k.bytes.size());
+}
+
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeVaultDestroyFiles(JNIEnv* env, jclass, jstring dir) {
+    std::string d = to_utf8(env, dir);
+    return pv_vault_destroy_files(d.c_str());
+}
+
+// Sets or clears the flag that makes every encrypt in flight fail at its next
+// read. The lock sets it while closing the vault and clears it on unlock.
+JNIEXPORT void JNICALL
+Java_com_privatevault_app_NativeBridge_nativeSetEncryptCancel(JNIEnv*, jclass, jboolean cancel) {
+    g_cancel_encrypts.store(cancel == JNI_TRUE);
 }
 
 // Phase 2 entry points.

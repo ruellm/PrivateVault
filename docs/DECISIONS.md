@@ -248,3 +248,73 @@ a `scan_file` call on the removed path through `content call`.
 
 Alternative: keep the getters and ignore directory rows. Rejected because the scan is
 supposed to leave the device as it found it.
+
+## D-016 Envelope 3 additional data is the whole image with the wrapped fields zeroed (2026-10-14, approved at the Phase 3A checkpoint)
+
+Choice: for every PIN slot of a provider 3 envelope, the AEAD additional data is the
+complete envelope with each slot's `wrapped_vmk` field replaced by zeros. The writer builds
+that image first and fills the wrapped fields afterwards; the reader zeroes the same fields
+before unwrapping. A change anywhere outside a wrapped field, including adding or removing
+a slot, fails every slot; a change inside a wrapped field fails that slot's tag.
+
+Alternatives: the additional data as the bytes before the slot's own `wrapped_vmk` (the
+phrasing in the brief). For a single slot the two differ only by 48 trailing zeros; with
+several slots the prefix form leaves later slots unbound, which the brief also asks to
+avoid. The masked-image form costs one copy of a file under 4 KiB.
+
+## D-017 A rewrap creates a fresh Keystore HMAC key and deletes the old one after the rename (2026-10-14, approved at the Phase 3A checkpoint)
+
+Choice: every PIN change and the migration generate a new Keystore HMAC-SHA256 key under
+a fresh alias (`privatevault.pin.<16 hex>`), write the new envelope naming it, and delete
+the previous alias (or the provider 2 alias) only after the rename returned. An alias
+sweep after every successful unlock removes aliases the current envelope does not name.
+
+Alternative: keep one HMAC key for the life of the vault and only change salt and PIN.
+Rejected because a copy of `vault.key` taken before the PIN change would still open with
+the old PIN on the device. With the old key gone, the old copy has nothing to run its HMAC
+with. Cost: one key generation per rewrap (15 ms on the emulator) and the sweep.
+
+## D-018 A reboot restarts the current wrong-PIN delay (2026-10-14, approved at the Phase 3A checkpoint)
+
+Choice: `pv_pin_remaining_ms` returns the larger of the elapsed-clock and wall-clock
+estimates while the boot count is unchanged, and the whole delay again after a reboot.
+
+Alternative: trust the wall clock after a reboot. Rejected because the device owner can set
+the wall clock, so a reboot plus a clock change would skip the delay. Restarting the delay
+costs a legitimate user one extra wait, at most an hour, only after a reboot during a
+delay.
+
+## D-019 LockActivity is the exported launcher; scripted actions enter through it (2026-10-14, approved at the Phase 3A checkpoint)
+
+Choice: the lock screen is the only exported activity. `MainActivity` (vault screen) and
+`CaptureActivity` are not exported and route to the lock screen whenever the process state
+is not `UNLOCKED`. The `actions` extra of D-009 is read by `ScriptActivity`, which lives in
+the debug source set and is exported by the debug manifest only (the developer's amendment
+at the checkpoint: the shell cannot start a non-exported activity, so a debug-only exported
+entry point is needed); the list must begin with `unlock_pin=<pin>` or `setup_pin=<pin>`,
+after which the rest is handed to the vault screen as before. The benchmark and release
+manifests export nothing but `LockActivity`.
+
+## D-020 Background detection by counting started activities, not ProcessLifecycleOwner (2026-10-14)
+
+Found in the host-driven T2 run: pressing Home while unlocked never produced the
+background lock, although the screen-off and idle triggers did. `ProcessLifecycleOwner`
+(`androidx.lifecycle:lifecycle-process`) is attached by `ProcessLifecycleInitializer`
+through the `androidx.startup.InitializationProvider`, and D-013 removes that provider from
+the merged manifest with `tools:node="remove"` because `profileinstaller` registers through
+the same provider. With the provider gone, the owner never observes any activity and
+`ON_STOP` never fires.
+
+Choice: `PvApp` registers `ActivityLifecycleCallbacks`, counts started activities, and
+asks for the lock 700 ms after the count reaches zero, which is the rule
+`ProcessLifecycleOwner` applies internally (the delay lets a rotation or a permission dialog
+pass). The `lifecycle-process` dependency is removed again; CP-6 is withdrawn.
+
+Alternative: keep the dependency and merge the provider back with only the lifecycle
+initializer (`tools:node="merge"` on the provider, `tools:node="remove"` on the
+profileinstaller meta-data). Rejected because the counting is twenty lines, needs no
+provider, and keeps the merged manifest exactly as Phase 2 left it.
+
+Alternative: keep `MainActivity` exported and let it show a lock view when locked. Rejected
+because every entry point would then need the same check, and a scripted `am start` could
+reach the vault screen class directly.

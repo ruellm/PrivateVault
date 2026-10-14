@@ -211,6 +211,30 @@ int rename_no_replace(const std::string& from, const std::string& to) {
                                                                       : PV_ERR_IO);
 }
 
+int rename_replace(const std::string& from, const std::string& to) {
+    std::wstring wf, wt;
+    if (!to_wide(from, wf) || !to_wide(to, wt)) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    if (MoveFileExW(wf.c_str(), wt.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        return PV_OK;
+    }
+    return fail(PV_ERR_IO);
+}
+
+int remove_dir(const std::string& path) {
+    std::wstring w;
+    if (!to_wide(path, w)) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    if (RemoveDirectoryW(w.c_str())) {
+        return PV_OK;
+    }
+    DWORD e = GetLastError();
+    return fail((e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) ? PV_ERR_NOT_FOUND
+                                                                         : PV_ERR_IO);
+}
+
 int list_dir(const std::string& dir, std::vector<std::string>& names) {
     std::wstring w;
     if (!to_wide(join(dir, "*"), w)) {
@@ -383,6 +407,21 @@ int rename_no_replace(const std::string& from, const std::string& to) {
     }
     fsync_dir(parent_dir(to));
     return PV_OK;
+}
+
+int rename_replace(const std::string& from, const std::string& to) {
+    if (::rename(from.c_str(), to.c_str()) != 0) {
+        return fail(PV_ERR_IO);
+    }
+    fsync_dir(parent_dir(to));
+    return PV_OK;
+}
+
+int remove_dir(const std::string& path) {
+    if (::rmdir(path.c_str()) == 0) {
+        return PV_OK;
+    }
+    return fail(errno == ENOENT ? PV_ERR_NOT_FOUND : PV_ERR_IO);
 }
 
 int list_dir(const std::string& dir, std::vector<std::string>& names) {

@@ -31,6 +31,8 @@ object NativeBridge {
     const val ERR_ITEM_UNSUPPORTED = 22
     // Classification, not corruption: the plaintext has no item header.
     const val ERR_NOT_ITEM = 23
+    // A provider 3 envelope with no slot this reader can use.
+    const val ERR_ENVELOPE_NO_SLOT = 24
 
     const val VMK_BYTES = 32
     const val OBJECT_ID_BYTES = 16
@@ -41,6 +43,20 @@ object NativeBridge {
     const val MEDIA_VIDEO_SEGMENT = 2
     const val MEDIA_VIDEO_INDEX = 3
     const val ITEM_HEADER_BYTES = 48
+
+    const val PIN_SALT_BYTES = 16
+    const val KEK_BYTES = 32
+    const val PIN_OPSLIMIT_MIN = 2L
+    const val PIN_OPSLIMIT_MAX = 3L
+    const val PIN_MEMLIMIT_MIN = 64L shl 20
+    const val PIN_MEMLIMIT_MAX = 256L shl 20
+    // Written into new envelopes. Provisional until the phone measurement.
+    const val PIN_OPSLIMIT_DEFAULT = 3L
+    const val PIN_MEMLIMIT_DEFAULT = 64L shl 20
+    const val ENVELOPE_PROVIDER_PIN = 3
+    const val MECHANISM_ANDROID_KEYSTORE_HMAC = 1
+    const val ENVELOPE_ALIAS_MAX = 64
+    const val ENVELOPE3_MAX_BYTES = 4096
 
     init {
         System.loadLibrary("privatevault_jni")
@@ -85,6 +101,38 @@ object NativeBridge {
     external fun nativeFileReadAll(path: String): ByteArray?
     external fun nativeFileDelete(path: String): Int
     external fun nativeProbeLink(dir: String): Int
+
+    // Phase 3A. Argon2id over the PIN bytes into a 32-byte key. Parameters
+    // outside the core range give ERR_ENVELOPE_KDF_PARAMS before any memory
+    // is requested. The caller wipes pin and out.
+    external fun nativePinStretch(
+        pin: ByteArray, salt: ByteArray, opslimit: Long, memlimit: Long, out: ByteArray
+    ): Int
+    external fun nativePinSaltGenerate(out: ByteArray): Int
+    // Wrong-PIN delay arithmetic (docs/PHASE3A_DESIGN.md Section 8).
+    external fun nativePinDelayMs(failures: Int): Long
+    external fun nativePinRemainingMs(
+        delayMs: Long, failElapsedMs: Long, nowElapsedMs: Long, failWallMs: Long, nowWallMs: Long,
+        bootChanged: Boolean
+    ): Long
+    // Envelope 3. infoOut = [version, provider, slot_count, pin_slot_count,
+    // unknown_slot_count, pin_slot_index, mechanism, opslimit, memlimit].
+    external fun nativeEnvelope3Parse(
+        envelope: ByteArray, infoOut: LongArray, saltOut: ByteArray, aliasOut: Array<String?>
+    ): Int
+    // Vault forms: the VMK stays inside the core. Status returned, handle in handleOut.
+    external fun nativeVaultCreateEnvelope3(
+        dir: String, mechanism: Int, alias: String, opslimit: Long, memlimit: Long,
+        salt: ByteArray, kek: ByteArray, handleOut: LongArray
+    ): Int
+    external fun nativeVaultOpenEnvelope3(dir: String, kek: ByteArray, handleOut: LongArray): Int
+    external fun nativeVaultWriteEnvelope3(
+        handle: Long, mechanism: Int, alias: String, opslimit: Long, memlimit: Long,
+        salt: ByteArray, kek: ByteArray
+    ): Int
+    external fun nativeVaultDestroyFiles(dir: String): Int
+    // Makes every encrypt in flight fail at its next read while set.
+    external fun nativeSetEncryptCancel(cancel: Boolean)
 
     // Phase 2. fields = [media_type, rotation_degrees, width, height, created_unix_ms].
     // Direct buffer: the native side reads the bytes in place.

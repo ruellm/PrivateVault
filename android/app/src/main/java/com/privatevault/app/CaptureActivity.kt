@@ -1,6 +1,7 @@
 package com.privatevault.app
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Handler
@@ -35,7 +36,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 // FLAG_SECURE keeps the preview out of screenshots, screen recordings, and the
 // recents thumbnail. Scripted actions (debug use) arrive in the "actions"
 // extra and run once the camera is bound.
-class CaptureActivity : ComponentActivity() {
+class CaptureActivity : ComponentActivity(), LockController.Listener {
 
     companion object {
         const val TAG = "PrivateVault"
@@ -64,9 +65,32 @@ class CaptureActivity : ComponentActivity() {
     private var pendingActions: List<String> = emptyList()
     private val scriptThread by lazy { java.util.concurrent.Executors.newSingleThreadExecutor() }
 
+    private val lock: LockController get() = PvApp.of(this).lock
+    private var started = false
+
+    // Routes to the lock screen unless the vault is unlocked. Returns true
+    // when this activity is finishing.
+    private fun routeIfLocked(): Boolean {
+        if (lock.state == LockState.UNLOCKED) return false
+        startActivity(Intent(this, LockActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP))
+        finish()
+        return true
+    }
+
+    override fun onLockStateChanged(state: LockState) {
+        if (started && state != LockState.UNLOCKED && !isFinishing) routeIfLocked()
+    }
+
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        lock.touch()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+        if (routeIfLocked()) return
+        lock.addListener(this)
         session = PvApp.of(this).captureSession
         vaults = PvApp.of(this).vaultSession
 
@@ -78,6 +102,10 @@ class CaptureActivity : ComponentActivity() {
             text = "Capture"
             isEnabled = false
             setOnClickListener { capture { } }
+        }
+        val lockButton = Button(this).apply {
+            text = "Lock"
+            setOnClickListener { lock.requestLock("manual") }
         }
         grant = Button(this).apply {
             text = "Grant camera"
@@ -94,6 +122,7 @@ class CaptureActivity : ComponentActivity() {
         }
         buttons.addView(shutter)
         buttons.addView(flip)
+        buttons.addView(lockButton)
         buttons.addView(grant)
         root.addView(buttons)
         status = TextView(this).apply { setTextIsSelectable(true) }
@@ -105,13 +134,6 @@ class CaptureActivity : ComponentActivity() {
         pendingActions = intent?.getStringExtra(EXTRA_ACTIONS)
             ?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList()
 
-        if (vaults.vault == null) {
-            try {
-                say(vaults.openOrCreate())
-            } catch (e: Exception) {
-                say("vault open failed: ${e.message}")
-            }
-        }
         orientationListener = object : OrientationEventListener(this) {
             override fun onOrientationChanged(orientation: Int) {
                 if (orientation == ORIENTATION_UNKNOWN) return
@@ -129,17 +151,21 @@ class CaptureActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        started = true
+        if (routeIfLocked()) return
         orientationListener?.enable()
         if (hasCameraPermission() && provider != null && camera == null) bindCamera()
     }
 
     override fun onStop() {
+        started = false
         orientationListener?.disable()
         super.onStop()
     }
 
     override fun onDestroy() {
-        session.removeListener(listener)
+        lock.removeListener(this)
+        if (this::session.isInitialized) session.removeListener(listener)
         scriptThread.shutdownNow()
         super.onDestroy()
     }
@@ -330,7 +356,11 @@ class CaptureActivity : ComponentActivity() {
         val t0 = System.nanoTime()
         try {
             when {
-                name == "open" -> say(vaults.openOrCreate())
+                name == "open" -> say("vault open: ${vaults.vault != null}, lock state ${lock.state}")
+                name == "lock" -> {
+                    lock.lock("script")
+                    say("lock state ${lock.state}")
+                }
                 name == "capture_photo" -> captureAndWait(1)
                 name.startsWith("capture_photo_n=") -> captureAndWait(name.substringAfter('=').toInt())
                 name == "verify_all" || name == "verify" -> ObjectActions.verifyAll(vaults, ::say)

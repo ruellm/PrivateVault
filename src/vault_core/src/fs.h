@@ -29,6 +29,13 @@ int mkdir_if_missing(const std::string& path);
 // (PV_ERR_DEST_EXISTS). Durable on return as far as the platform allows.
 int rename_no_replace(const std::string& from, const std::string& to);
 
+// Renames from to to, replacing an existing destination. Used only for the
+// key envelope rewrite. Durable on return as far as the platform allows.
+int rename_replace(const std::string& from, const std::string& to);
+
+// Removes an empty directory. Missing: PV_ERR_NOT_FOUND. Not empty: PV_ERR_IO.
+int remove_dir(const std::string& path);
+
 // Names of the entries in dir, without "." and "..".
 int list_dir(const std::string& dir, std::vector<std::string>& names);
 

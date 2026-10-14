@@ -7,12 +7,16 @@
 //   make_vectors <output_dir>            all Phase 1 vectors and the item vectors
 //   make_vectors <output_dir> --items    only the item vectors; other manifest
 //                                        lines are kept
+//   make_vectors <output_dir> --envelope3   only the provider 3 envelope vectors
+//                                        (envelope3_*.key and envelope3.txt);
+//                                        manifest.txt and the objects are kept
 //
 // Manifest columns: name length chunk_size blake2b object_id media_type
 // rotation width height created_unix_ms payload_len. For an item vector the
 // plaintext is the 48-byte item header followed by payload_len deterministic
 // bytes, length is the whole plaintext, and blake2b is over the payload only.
 // For a plain vector the last six columns are "-".
+#include "envelope3_builder.h"
 #include "pv/pv.h"
 
 #include <sodium.h>
@@ -164,6 +168,73 @@ int item_line(const std::string& dir, const ItemSpec& s, std::string& line) {
     return 0;
 }
 
+// Provider 3 envelope vectors (Phase 3A). The Keystore step cannot run on
+// Windows, so the vectors fix the KEK instead of deriving it. The test PIN,
+// salt, and parameters are recorded with the Argon2id output so both
+// platforms can check their stretch against the same answer.
+const char* kKek = "PRIVATEVAULT TEST ONLY KEK  0001";
+const char* kPin = "000000";
+const char* kSalt = "PVTESTONLYSALT01";
+const char* kAlias = "privatevault.pin.testonly";
+
+int write_envelope_vectors(const std::string& dir) {
+    const uint8_t* kek = reinterpret_cast<const uint8_t*>(kKek);
+    const uint8_t* salt = reinterpret_cast<const uint8_t*>(kSalt);
+    const uint32_t ops = PV_PIN_OPSLIMIT_MIN;
+    const uint64_t mem = PV_PIN_MEMLIMIT_MIN;
+    uint8_t k_pin[PV_KEK_BYTES];
+    if (pv_pin_stretch(reinterpret_cast<const uint8_t*>(kPin), std::strlen(kPin), salt,
+                       PV_PIN_SALT_BYTES, ops, mem, k_pin, sizeof(k_pin)) != PV_OK) {
+        return 2;
+    }
+    e3::Bytes body = e3::pin_body(PV_MECHANISM_ANDROID_KEYSTORE_HMAC, kAlias, ops, mem, salt, nullptr);
+    e3::Bytes single = e3::build(1, 3, 1, 0, {{PV_SLOT_PIN, body}}, vmk(), {kek});
+    e3::Bytes unknown_body(24, 0x5a);
+    e3::Bytes with_unknown = e3::build(1, 3, 2, 0, {{7, unknown_body}, {PV_SLOT_PIN, body}}, vmk(), {kek});
+    // The library must open both.
+    uint8_t back[PV_VMK_BYTES];
+    for (const e3::Bytes* e : {&single, &with_unknown}) {
+        if (pv_envelope3_open(e->data(), e->size(), kek, PV_KEK_BYTES, back, sizeof(back)) != PV_OK ||
+            std::memcmp(back, vmk(), PV_VMK_BYTES) != 0) {
+            std::fprintf(stderr, "envelope vector does not open\n");
+            return 2;
+        }
+    }
+    const std::string f1 = dir + "/envelope3_single.key";
+    const std::string f2 = dir + "/envelope3_unknown_slot.key";
+    pv_file_delete(f1.c_str());
+    pv_file_delete(f2.c_str());
+    if (pv_file_write_atomic(f1.c_str(), single.data(), single.size()) != PV_OK ||
+        pv_file_write_atomic(f2.c_str(), with_unknown.data(), with_unknown.size()) != PV_OK) {
+        return 2;
+    }
+    std::string text =
+        "# TEST ONLY provider 3 envelope vectors. Nothing here is a secret.\n"
+        "# Both .key files wrap the test VMK under the fixed KEK stand-in below (the\n"
+        "# Keystore step is replaced by a constant for the vectors). k_pin_hex is the\n"
+        "# Argon2id output for the test PIN, salt, and parameters; both platforms\n"
+        "# check their stretch against it. Format: key value per line.\n";
+    text += "kek_hex " + hex(kek, PV_KEK_BYTES) + "\n";
+    text += std::string("pin ") + kPin + "\n";
+    text += "salt_hex " + hex(salt, PV_PIN_SALT_BYTES) + "\n";
+    text += "opslimit " + std::to_string(ops) + "\n";
+    text += "memlimit " + std::to_string(mem) + "\n";
+    text += "k_pin_hex " + hex(k_pin, sizeof(k_pin)) + "\n";
+    text += std::string("alias ") + kAlias + "\n";
+    text += "mechanism " + std::to_string(PV_MECHANISM_ANDROID_KEYSTORE_HMAC) + "\n";
+    text += "vector envelope3_single.key 1\n";
+    text += "vector envelope3_unknown_slot.key 2\n";
+    const std::string tpath = dir + "/envelope3.txt";
+    pv_file_delete(tpath.c_str());
+    if (pv_file_write_atomic(tpath.c_str(), reinterpret_cast<const uint8_t*>(text.data()),
+                             text.size()) != PV_OK) {
+        return 2;
+    }
+    std::printf("wrote envelope3_single.key (%zu bytes), envelope3_unknown_slot.key (%zu bytes), envelope3.txt\n",
+                single.size(), with_unknown.size());
+    return 0;
+}
+
 std::string first_word(const std::string& line) {
     std::istringstream in(line);
     std::string w;
@@ -182,14 +253,19 @@ int field_count(const std::string& line) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 2 || argc > 3 || (argc == 3 && std::strcmp(argv[2], "--items") != 0)) {
-        std::fprintf(stderr, "usage: make_vectors <output_dir> [--items]\n");
+    const bool envelope_only = argc == 3 && std::strcmp(argv[2], "--envelope3") == 0;
+    if (argc < 2 || argc > 3 ||
+        (argc == 3 && std::strcmp(argv[2], "--items") != 0 && !envelope_only)) {
+        std::fprintf(stderr, "usage: make_vectors <output_dir> [--items|--envelope3]\n");
         return 1;
     }
     if (pv_init() != PV_OK) {
         return 2;
     }
     const std::string dir = argv[1];
+    if (envelope_only) {
+        return write_envelope_vectors(dir);
+    }
     const bool items_only = argc == 3;
     const uint32_t c = PV_MIN_CHUNK_SIZE;
     const Spec specs[] = {
@@ -254,5 +330,5 @@ int main(int argc, char** argv) {
         return 2;
     }
     std::printf("wrote %zu manifest lines to %s\n", lines.size(), dir.c_str());
-    return 0;
+    return write_envelope_vectors(dir);
 }

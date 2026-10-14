@@ -62,6 +62,13 @@ class Vault private constructor(val dir: File, private var handle: Long) {
             }
         }
 
+        // Wraps a handle the core opened itself (provider 3 paths, where the
+        // key never crossed into Kotlin).
+        fun fromHandle(dir: File, handle: Long): Vault {
+            if (handle == 0L) throw CoreException(NativeBridge.ERR_INTERNAL, "vault open: null handle")
+            return Vault(dir, handle)
+        }
+
         // Opens with raw key bytes. The caller wipes its copy afterwards.
         fun openWithKey(dir: File, vmk: ByteArray): Vault {
             val handleOut = LongArray(1)

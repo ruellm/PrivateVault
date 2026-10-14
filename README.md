@@ -129,9 +129,22 @@ emulator -avd Pixel_8_API_35 -no-window -no-audio -no-boot-anim -no-snapshot -gp
 adb -e shell getprop sys.boot_completed   # wait for 1
 ```
 
-T3 steps on a device, scripted through the `actions` extra of `MainActivity`. Results appear
-in logcat under the tag `PrivateVault` and on screen. The extra is read in `onCreate`, so
-force-stop the app before each launch. Capture actions (`capture_photo`,
+Since Phase 3A the app starts on a lock screen (`LockActivity`, the only exported activity
+in the benchmark and release variants). A new install asks for a 6 to 12 digit PIN; an
+existing Phase 1 or 2 vault asks for a PIN once and is rewrapped in place. The vault locks
+on background, screen off, 5 minutes idle, and the Lock button; a process restart always
+starts locked. Five wrong PINs start a 30 s delay that doubles per attempt (cap 1 h).
+"Forgot PIN: erase vault" on the lock screen deletes the keys and every object after the
+word `ERASE` is typed. The lock screen also has a Diagnostics button (Argon2id timing and
+the Keystore HMAC probe) that needs no vault, so the benchmark build can be measured on a
+phone by hand. Design: `docs/PHASE3A_DESIGN.md`.
+
+T3 steps on a device are scripted through the `actions` extra of the debug-only
+`ScriptActivity`, which must unlock first: the list starts with `unlock_pin=<pin>` or
+`setup_pin=<pin>` (a throwaway test PIN; never a real one). Before that only
+`set_idle_ms=<ms>`, `unlock_delay_ms=<ms>`, `kdf_bench`, and `hmac_probe` are accepted.
+Results appear in logcat under the tag `PrivateVault` and on the vault screen. Force-stop
+the app before each launch. Capture actions (`capture_photo`,
 `capture_photo_n=<n>`, `flip`, `memory`, `video_probe`, `v2_probe`, `test_hook_slow=<ms>`,
 `test_hook_clear`) hand the rest of the list to the capture screen, which needs the camera
 permission granted (`adb shell pm grant com.privatevault.app android.permission.CAMERA` on a
@@ -141,15 +154,16 @@ test device, or the on-screen dialog). Other actions: `open`, `encrypt_1mb`, `en
 
 ```
 adb install app-debug.apk
-adb shell am start -n com.privatevault.app/.MainActivity --es actions open,security_level,encrypt_1mb,encrypt_100mb,verify
+adb shell am start -n com.privatevault.app/.ScriptActivity --es actions setup_pin=246810,open,security_level,encrypt_1mb,verify   # first PIN (new vault or migration)
 adb shell am force-stop com.privatevault.app
-adb shell am start -n com.privatevault.app/.MainActivity --es actions open,verify
-adb reboot          # unlock the device afterwards; the Keystore key needs an unlocked device
-adb shell am start -n com.privatevault.app/.MainActivity --es actions open,verify
+adb shell am start -n com.privatevault.app/.ScriptActivity --es actions unlock_pin=246810,open,verify
+adb reboot          # unlock the device afterwards if it has a screen lock
+adb shell am start -n com.privatevault.app/.ScriptActivity --es actions unlock_pin=246810,open,verify
 adb shell am force-stop com.privatevault.app
-adb shell am start -n com.privatevault.app/.MainActivity --es actions open,tamper,truncation,wrong_key,security_level
-adb shell am start -n com.privatevault.app/.MainActivity --es actions open,capture_photo_n=10,verify_all,list,leak_scan
-adb shell am start -n com.privatevault.app/.MainActivity --es actions open,video_probe,leak_scan     # debug build only
+adb shell am start -n com.privatevault.app/.ScriptActivity --es actions unlock_pin=246810,tamper,truncation,wrong_key,security_level
+adb shell am start -n com.privatevault.app/.ScriptActivity --es actions unlock_pin=246810,capture_photo_n=10,verify_all,list,leak_scan
+adb shell am start -n com.privatevault.app/.ScriptActivity --es actions unlock_pin=246810,video_probe,leak_scan     # debug build only
+adb shell am start -n com.privatevault.app/.ScriptActivity --es actions kdf_bench,hmac_probe        # no vault needed
 adb logcat -d -s PrivateVault:I
 ```
 

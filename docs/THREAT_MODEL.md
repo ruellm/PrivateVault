@@ -145,3 +145,47 @@ Camera HAL and vendor buffers (`/data/vendor` dumps, ISP memory), MIUI system se
 the phone, kernel and GPU buffers, swap and zram contents, the `ImageReader` buffer after
 `close()`, and any copy CameraX makes internally. The prototype does not claim erasure of
 any of these. The Kotlin `ByteArray` copy of the VMK from Phase 1 is unchanged.
+
+## 7. Phase 3A additions: PIN lock (proposed 2026-10-14, to be confirmed at Milestone E)
+
+What Stage 3A claims, and only this: **a provider 3 vault opens only with the correct PIN
+on the device that holds its Keystore key, and the app shows no vault content while
+locked.** The construction (Argon2id, then HMAC-SHA256 under a non-exportable Keystore
+key, then XChaCha20-Poly1305 unwrap of the VMK) composes standard primitives and has not
+been reviewed. Design: `docs/PHASE3A_DESIGN.md`.
+
+### 7.1 New assets
+
+| Asset | Where it lives | Lifetime |
+|---|---|---|
+| PIN digits | A `ByteArray` filled by the in-app keypad, zeroed after the stretch call | Seconds |
+| `k_pin` (stretched PIN) | Core output copied into a Kotlin `ByteArray` for the Keystore call, zeroed after | Milliseconds |
+| KEK | Keystore `Mac` output in a Kotlin `ByteArray`, copied into the core for the unwrap, zeroed after | Milliseconds |
+| Keystore HMAC key | Android Keystore, alias named in the envelope | Until rewrap, erase, Clear Data, uninstall, or factory reset |
+| Attempt counter and clocks | App-private preferences | Until a successful unlock or erase |
+
+### 7.2 Threats and the Stage 3A position
+
+| # | Threat | Position |
+|---|---|---|
+| T17 | Someone holding the phone opens the vault | The PIN. On a device without a secure lock screen (the Xiaomi), the Keystore key is usable whenever the device is on, so the PIN and its guessing cost are the whole defence. |
+| T18 | Copies `vault.key` and guesses offline | Each guess needs the Keystore key, which does not leave the device. Off the device the copy is useless. |
+| T19 | Guesses on the device | Each guess costs one Argon2id run (target 0.5 to 1.0 s in the optimised build) plus one Keystore call. Six digits are 6 to 12 days of single-threaded work at that cost; each extra digit multiplies it by ten. The app adds delays after five wrong attempts (30 s doubling, cap 1 h), persistent across restarts and clock changes. No hardware attempt counter exists for app Keystore keys; an attacker with root can reset the delays and is limited by the KDF cost alone. |
+| T20 | Old envelope copy after a PIN change | The Keystore key is replaced at every rewrap and the old alias deleted after the commit (D-017), so an old copy has no key to run with. Key deletion is as strong as the Keystore implementation. |
+| T21 | App left open, screen off, backgrounded, or killed | Lock on background, screen off, 5 minutes idle, manual lock; the process never starts unlocked. While locking, queued captures are dropped and an in-flight encrypt is cancelled, which makes the core delete its `.partial`. |
+| T22 | Screenshot or recents thumbnail of the lock screen or a dialog | `FLAG_SECURE` on every activity; confirmations are in-activity views, not dialogs. |
+| T23 | Interrupted migration, PIN change, or erase | Rewrap commits by a rename over `vault.key`; the old key is deleted only after it. Erase sets a pending flag first and the next start finishes it. |
+| T24 | Secrets in logs | No PIN, `k_pin`, `kek`, or PIN length is logged; T2 scans logcat for them. Test PINs are throwaway. |
+
+### 7.3 Residual risks
+
+- Kotlin copies: the PIN digits, `k_pin`, and `kek` exist as managed `ByteArray` objects
+  for a short time; the garbage collector may copy them before they are zeroed. The VMK
+  itself no longer crosses JNI for a provider 3 vault (setup and rewrap happen inside the
+  core); the provider 2 migration is the one remaining crossing.
+- Delays are app-enforced state in a preferences file; root or Clear Data removes them
+  (Clear Data also removes the Keystore keys and so the vault).
+- Argon2id memory: the unlock allocates `memlimit` bytes once; on a low-memory device the
+  allocation may fail and the unlock reports it instead of weakening the parameters.
+- Erased files are directory-entry removals; flash blocks may persist until reuse.
+- Nothing here has been independently reviewed.

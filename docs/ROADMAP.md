@@ -6,7 +6,8 @@ Condensed from `PROJECT_HANDOFF.md` Section 3. Phase 2 is the active phase.
 |---|---|---|
 | 1 | Encrypted storage core (C++20, libsodium), desktop CLI, Android proof of concept, tests, documentation | Complete |
 | 2 | In-app photo capture written straight into encrypted objects; plaintext exposure audit; video feasibility prototype | Active |
-| 3 | Protected in-app viewer, `FLAG_SECURE`, lock on background, video seeking approach; in-app lock decision at the start (P2-5) | Not started |
+| 3A | PIN lock, PIN-derived vault key (envelope provider 3), migration, lock rules, attempt delays, erase (`docs/PHASE3A_DESIGN.md`) | Done on Windows and the emulator; T3 on the Xiaomi open |
+| 3B to 3E | Photo viewer and delete, dependency cleanup, video groundwork, playback, capture | Not started |
 | Video | Full video capture: viewfinder mirror, native segment buffering, index and recovery rules, audio; recommended as its own phase or the second half of Phase 3 (`docs/VIDEO_CAPTURE_FEASIBILITY.md` Section 6) | Not started |
 | 4 | Temporal interference experiment against external cameras; measured, not promised | Not started |
 | 5 | Permission-based sharing between devices, streaming from the source device, revocation, local access log | Not started |

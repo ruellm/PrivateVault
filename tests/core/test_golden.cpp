@@ -1,7 +1,10 @@
 // Decrypts the committed golden vectors under the test key and compares the
 // plaintext hash with the manifest. Any accidental format change fails here.
 // Item vectors (manifest columns 6 to 11 present) go through the item sink
-// and must report the recorded header fields.
+// and must report the recorded header fields. The provider 3 envelope
+// vectors (envelope3.txt, when present) must open with the recorded KEK
+// stand-in to the test VMK, and the test PIN must stretch to the recorded
+// k_pin.
 #include "test_support.h"
 
 #include <cstdio>
@@ -123,5 +126,70 @@ int main(int argc, char** argv) {
     // directory needs at least one vector.
     CHECK(count >= (argc > 1 ? 1 : 12));
     if (argc == 1) CHECK(item_count >= 4);
+
+    // Envelope vectors. An external directory (Android export) has none.
+    std::ifstream env_manifest(ts::u8path(dir + "/envelope3.txt"));
+    if (argc == 1) CHECK(env_manifest.good());
+    if (env_manifest.good()) {
+        std::string kek_hex, pin, salt_hex, k_pin_hex, alias;
+        uint64_t ops = 0, mem = 0;
+        unsigned mechanism = 0;
+        std::vector<std::pair<std::string, unsigned>> vectors;
+        while (std::getline(env_manifest, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            std::istringstream in(line);
+            std::string key;
+            in >> key;
+            if (key == "kek_hex") in >> kek_hex;
+            else if (key == "pin") in >> pin;
+            else if (key == "salt_hex") in >> salt_hex;
+            else if (key == "opslimit") in >> ops;
+            else if (key == "memlimit") in >> mem;
+            else if (key == "k_pin_hex") in >> k_pin_hex;
+            else if (key == "alias") in >> alias;
+            else if (key == "mechanism") in >> mechanism;
+            else if (key == "vector") {
+                std::string name;
+                unsigned slots = 0;
+                in >> name >> slots;
+                vectors.emplace_back(name, slots);
+            }
+        }
+        CHECK(kek_hex.size() == 64 && salt_hex.size() == 32 && k_pin_hex.size() == 64);
+        CHECK(!pin.empty() && !alias.empty() && vectors.size() == 2);
+        ts::Bytes kek(PV_KEK_BYTES), salt(PV_PIN_SALT_BYTES), k_pin(PV_KEK_BYTES);
+        CHECK_EQ(sodium_hex2bin(kek.data(), kek.size(), kek_hex.c_str(), kek_hex.size(), nullptr, nullptr, nullptr), 0);
+        CHECK_EQ(sodium_hex2bin(salt.data(), salt.size(), salt_hex.c_str(), salt_hex.size(), nullptr, nullptr, nullptr), 0);
+        CHECK_EQ(sodium_hex2bin(k_pin.data(), k_pin.size(), k_pin_hex.c_str(), k_pin_hex.size(), nullptr, nullptr, nullptr), 0);
+        // The stretch of the test PIN equals the recorded answer.
+        ts::Bytes got(PV_KEK_BYTES);
+        CHECK_EQ(pv_pin_stretch(reinterpret_cast<const uint8_t*>(pin.data()), pin.size(), salt.data(),
+                                salt.size(), ops, mem, got.data(), got.size()), PV_OK);
+        CHECK(got == k_pin);
+        for (const auto& v : vectors) {
+            ts::Bytes env = ts::read_file(dir + "/" + v.first);
+            pv_envelope3_info info{};
+            CHECK_EQ(pv_envelope3_parse(env.data(), env.size(), &info), PV_OK);
+            CHECK_EQ(info.slot_count, v.second);
+            CHECK_EQ(info.pin_slot_count, 1);
+            CHECK_EQ(std::string(info.pin.alias), alias);
+            CHECK_EQ(info.pin.mechanism, mechanism);
+            CHECK_EQ(info.pin.opslimit, ops);
+            CHECK_EQ(info.pin.memlimit, mem);
+            CHECK(ts::Bytes(info.pin.salt, info.pin.salt + PV_PIN_SALT_BYTES) == salt);
+            ts::Bytes vmk(PV_VMK_BYTES);
+            CHECK_EQ(pv_envelope3_open(env.data(), env.size(), kek.data(), kek.size(), vmk.data(), vmk.size()), PV_OK);
+            CHECK_EQ(std::memcmp(vmk.data(), ts::test_vmk(), PV_VMK_BYTES), 0);
+            CHECK_EQ(pv_envelope3_open(env.data(), env.size(), ts::other_vmk().data(), PV_KEK_BYTES, vmk.data(), vmk.size()),
+                     PV_ERR_ENVELOPE_UNWRAP_FAILED);
+            // The VMK that came out decrypts an object vector.
+            ts::Bytes obj = ts::read_file(dir + "/one_byte.pvo");
+            ts::Bytes plain;
+            CHECK_EQ(pv_envelope3_open(env.data(), env.size(), kek.data(), kek.size(), vmk.data(), vmk.size()), PV_OK);
+            CHECK_EQ(ts::decrypt_mem(vmk.data(), obj, plain), PV_OK);
+            CHECK_EQ(plain.size(), 1u);
+            std::printf("%s ok (%u slots)\n", v.first.c_str(), v.second);
+        }
+    }
     return 0;
 }

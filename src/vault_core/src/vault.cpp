@@ -1,12 +1,7 @@
 // Vault directory handling: object naming, partial files, atomic finalize.
 #include "format.h"
 #include "fs.h"
-
-struct pv_vault {
-    std::string dir;
-    std::string objects_dir;
-    uint8_t* vmk;
-};
+#include "vault_internal.h"
 
 namespace pv {
 
@@ -19,7 +14,6 @@ int object_inspect(pv_source* src, pv_object_info* out);
 
 namespace {
 
-constexpr const char* kObjectsDirName = "objects";
 constexpr const char* kObjectSuffix = ".pvo";
 constexpr const char* kPartialSuffix = ".pvo.partial";
 constexpr const char* kTempSuffix = ".pvtmp";
@@ -145,6 +139,35 @@ int vault_decrypt_to_file(pv_vault* v, const uint8_t* object_id, const std::stri
 }
 
 }  // namespace
+
+int vault_open_raw(const std::string& dir, const uint8_t* vmk, pv_vault** out) {
+    std::string objects_dir = fs::join(dir, kObjectsDirName);
+    bool is_dir = false;
+    int rc = fs::dir_exists(objects_dir, &is_dir);
+    if (rc != PV_OK) {
+        return rc;
+    }
+    if (!is_dir) {
+        return PV_ERR_NOT_FOUND;
+    }
+    rc = remove_stale_partials(objects_dir);
+    if (rc != PV_OK) {
+        return rc;
+    }
+    uint8_t* key = static_cast<uint8_t*>(sodium_malloc(PV_VMK_BYTES));
+    if (!key) {
+        return PV_ERR_OUT_OF_MEMORY;
+    }
+    std::memcpy(key, vmk, PV_VMK_BYTES);
+    pv_vault* v = new (std::nothrow) pv_vault{dir, objects_dir, key};
+    if (!v) {
+        sodium_free(key);
+        return PV_ERR_OUT_OF_MEMORY;
+    }
+    *out = v;
+    return PV_OK;
+}
+
 }  // namespace pv
 
 extern "C" {
@@ -180,31 +203,7 @@ int pv_vault_open(const char* dir, const uint8_t* vmk, size_t vmk_len, pv_vault*
     }
     *out = nullptr;
     try {
-        std::string objects_dir = pv::fs::join(dir, pv::kObjectsDirName);
-        bool is_dir = false;
-        rc = pv::fs::dir_exists(objects_dir, &is_dir);
-        if (rc != PV_OK) {
-            return rc;
-        }
-        if (!is_dir) {
-            return PV_ERR_NOT_FOUND;
-        }
-        rc = pv::remove_stale_partials(objects_dir);
-        if (rc != PV_OK) {
-            return rc;
-        }
-        uint8_t* key = static_cast<uint8_t*>(sodium_malloc(PV_VMK_BYTES));
-        if (!key) {
-            return PV_ERR_OUT_OF_MEMORY;
-        }
-        std::memcpy(key, vmk, PV_VMK_BYTES);
-        pv_vault* v = new (std::nothrow) pv_vault{dir, objects_dir, key};
-        if (!v) {
-            sodium_free(key);
-            return PV_ERR_OUT_OF_MEMORY;
-        }
-        *out = v;
-        return PV_OK;
+        return pv::vault_open_raw(dir, vmk, out);
     } catch (const std::bad_alloc&) {
         return PV_ERR_OUT_OF_MEMORY;
     } catch (...) {

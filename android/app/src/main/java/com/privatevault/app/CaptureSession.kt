@@ -50,6 +50,9 @@ class CaptureSession(private val context: Context, private val vaults: VaultSess
 
     val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "pv-encrypt") }
     private val pending = AtomicInteger(0)
+    // Set while the vault is locking: no new captures, queued images are
+    // dropped, and the encrypt in flight is cancelled through the core.
+    @Volatile private var closing = false
     private val history = ArrayList<String>()
     private val listeners = ArrayList<(String) -> Unit>()
     @Volatile var lastResult: Result? = null
@@ -62,6 +65,7 @@ class CaptureSession(private val context: Context, private val vaults: VaultSess
     // Reserves a queue slot before takePicture. False means QUEUE_FULL.
     fun reserve(): Boolean {
         while (true) {
+            if (closing) return false
             val n = pending.get()
             if (n >= MAX_PENDING) return false
             if (pending.compareAndSet(n, n + 1)) return true
@@ -104,7 +108,7 @@ class CaptureSession(private val context: Context, private val vaults: VaultSess
         val createdMs = System.currentTimeMillis()
         executor.execute {
             val result = try {
-                encryptOne(proxy, shutterNanos, createdMs)
+                if (closing) cancelled(proxy, shutterNanos) else encryptOne(proxy, shutterNanos, createdMs)
             } finally {
                 release()
             }
@@ -114,6 +118,44 @@ class CaptureSession(private val context: Context, private val vaults: VaultSess
             onDone(result)
         }
     }
+
+    // An image that was still queued when the lock started: closed, nothing written.
+    private fun cancelled(proxy: ImageProxy, shutterNanos: Long): Result {
+        try {
+            proxy.close()
+        } catch (e: Exception) {
+            Log.w(TAG, "ImageProxy.close: ${e.javaClass.simpleName}")
+        }
+        return Result(null, "CANCELLED", 0, 0, 0, 0, 0, "none", 0,
+            (System.nanoTime() - shutterNanos) / 1_000_000, "skipped", null, 0, 0)
+    }
+
+    // Lock support (docs/PHASE3A_DESIGN.md Section 5). drain refuses new
+    // work, makes the encrypt in flight fail at its next read (the core then
+    // deletes its partial object), and waits up to timeoutMs for the queue
+    // to empty. awaitIdle waits without bound. resume reopens the queue.
+    fun drain(timeoutMs: Long): Boolean {
+        closing = true
+        NativeBridge.nativeSetEncryptCancel(true)
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000
+        while (pending.get() > 0 && System.nanoTime() < deadline) Thread.sleep(20)
+        return pending.get() == 0
+    }
+
+    // Once the queue is empty the cancel flag has done its work; it is
+    // cleared so encrypts outside this session (tests, the sample actions)
+    // run normally while the vault stays closed to captures.
+    fun awaitIdle() {
+        while (pending.get() > 0) Thread.sleep(20)
+        NativeBridge.nativeSetEncryptCancel(false)
+    }
+
+    fun resume() {
+        NativeBridge.nativeSetEncryptCancel(false)
+        closing = false
+    }
+
+    val isClosing: Boolean get() = closing
 
     private fun encryptOne(proxy: ImageProxy, shutterNanos: Long, createdMs: Long): Result {
         var jpegLen = 0
@@ -163,7 +205,8 @@ class CaptureSession(private val context: Context, private val vaults: VaultSess
                 bufferPath = stored!!.path.name
             }
         } catch (e: Vault.CoreException) {
-            status = e.message ?: NativeBridge.errorName(e.code)
+            status = if (closing && e.code == NativeBridge.ERR_IO) "CANCELLED"
+            else e.message ?: NativeBridge.errorName(e.code)
         } catch (e: Exception) {
             status = "${e.javaClass.simpleName}: ${e.message}"
         } finally {

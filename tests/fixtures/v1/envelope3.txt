@@ -1,0 +1,15 @@
+# TEST ONLY provider 3 envelope vectors. Nothing here is a secret.
+# Both .key files wrap the test VMK under the fixed KEK stand-in below (the
+# Keystore step is replaced by a constant for the vectors). k_pin_hex is the
+# Argon2id output for the test PIN, salt, and parameters; both platforms
+# check their stretch against it. Format: key value per line.
+kek_hex 505249564154455641554c542054455354204f4e4c59204b454b202030303031
+pin 000000
+salt_hex 5056544553544f4e4c5953414c543031
+opslimit 2
+memlimit 67108864
+k_pin_hex addd20c0171b2771755992cdd30a4e9af7fd36b6a7f6dc752191a7da8af38179
+alias privatevault.pin.testonly
+mechanism 1
+vector envelope3_single.key 1
+vector envelope3_unknown_slot.key 2

@@ -117,6 +117,22 @@ D-013). In the release variant `camera-view` still pulls `camera-video` 1.6.2, w
 the release variant therefore contains media3 classes it never calls. The debug APK is
 17.6 MB against 4.1 MB in Phase 1, mostly CameraX, media3, guava, and their dependencies.
 
+## Phase 3A Android dependencies (added in Milestone D, 2026-10-14)
+
+Fetched from Google Maven by Gradle and pinned in `android/app/build.gradle.kts`. License
+Apache 2.0.
+
+| Dependency | Version | Configuration | Role |
+|---|---|---|---|
+| `androidx.test:core` | 1.6.1 | `androidTestImplementation` | `ActivityScenario` for the lock screen window test. Already in the resolved test graph through `androidx.test.ext:junit` 1.2.1; pinned explicitly. |
+
+The PIN lock itself uses only libsodium (Argon2id, XChaCha20-Poly1305) and the platform
+Keystore (HMAC-SHA256 key); no other library was added. `androidx.lifecycle:lifecycle-process`
+2.6.2 was added for the background trigger and removed again in Milestone D: its
+`ProcessLifecycleOwner` is attached by the `androidx.startup` provider that D-013 removes
+from the manifest, so it never fired (D-020). The trigger counts started activities in
+`PvApp` instead.
+
 ## Not used
 
 - No TrueCrypt or VeraCrypt code (`docs/CONTAINER_FEASIBILITY.md`).

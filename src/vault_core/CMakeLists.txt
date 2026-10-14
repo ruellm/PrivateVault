@@ -6,6 +6,8 @@ add_library(vault_core STATIC
     src/vault.cpp
     src/streams.cpp
     src/item.cpp
+    src/pin.cpp
+    src/envelope3.cpp
 )
 
 target_include_directories(vault_core

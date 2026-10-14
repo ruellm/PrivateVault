@@ -31,6 +31,8 @@ pv_add_test(test_bounded_memory)
 pv_add_test(test_memory_source)
 pv_add_test(test_item_header)
 pv_add_test(test_item_objects)
+pv_add_test(test_pin_stretch)
+pv_add_test(test_envelope3)
 set_tests_properties(test_large test_bounded_memory PROPERTIES LABELS "large" TIMEOUT 1800)
 
 if(PV_TEST_HOOKS)
@@ -43,3 +45,4 @@ endif()
 # Golden vector generator (not a test).
 add_executable(make_vectors ../tools/make_vectors.cpp)
 target_link_libraries(make_vectors PRIVATE vault_core)
+target_include_directories(make_vectors PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
