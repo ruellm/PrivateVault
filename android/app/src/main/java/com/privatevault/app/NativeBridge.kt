@@ -50,9 +50,9 @@ object NativeBridge {
     const val PIN_OPSLIMIT_MAX = 3L
     const val PIN_MEMLIMIT_MIN = 64L shl 20
     const val PIN_MEMLIMIT_MAX = 256L shl 20
-    // Written into new envelopes. Provisional until the phone measurement.
-    const val PIN_OPSLIMIT_DEFAULT = 3L
-    const val PIN_MEMLIMIT_DEFAULT = 64L shl 20
+    // Written into new envelopes (docs/PHASE3A_DESIGN.md Section 3.4, CP-2).
+    const val PIN_OPSLIMIT_DEFAULT = 2L
+    const val PIN_MEMLIMIT_DEFAULT = 256L shl 20
     const val ENVELOPE_PROVIDER_PIN = 3
     const val MECHANISM_ANDROID_KEYSTORE_HMAC = 1
     const val ENVELOPE_ALIAS_MAX = 64
@@ -161,6 +161,9 @@ object NativeBridge {
     external fun nativeDecryptToArray(handle: Long, id: ByteArray, maxLen: Int, statusOut: IntArray): ByteArray?
     external fun nativeHashDirectBuffer(buffer: ByteBuffer, offset: Int, length: Int, hashOut: ByteArray): Int
     external fun nativeSetTestHooks(slowReadMs: Int, failAfterBytes: Long)
+    // Debug variant only: while set, nativePinStretch reports the allocation
+    // failure code (ERR_OUT_OF_MEMORY) without running the KDF.
+    external fun nativeSetPinStretchFailure(fail: Boolean)
 
     // Name plus the raw value, so an unexpected code is never hidden.
     fun errorName(code: Int): String = "${nativeErrorName(code)} ($code)"

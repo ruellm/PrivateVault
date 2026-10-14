@@ -37,9 +37,12 @@ class LockController(
         class Delayed(val remainingMs: Long) : Result()
         class Unopenable(val reason: String) : Result()
         class Failed(val message: String) : Result()
+        // Argon2id could not get its memory. Not a guess: the recorded attempt is rolled back.
+        object NoMemory : Result()
 
         fun describe(): String = when (this) {
             Ok -> "ok"
+            NoMemory -> "not enough memory, try again"
             is WrongPin -> "wrong PIN" + (if (remainingMs > 0) ", wait ${(remainingMs + 999) / 1000} s" else "")
             is Delayed -> "wait ${(remainingMs + 999) / 1000} s"
             is Unopenable -> "vault cannot be opened: $reason"
@@ -58,7 +61,13 @@ class LockController(
     class TestHooks {
         @Volatile var failAt: String? = null
         @Volatile var beforeStretch: (() -> Unit)? = null
+        // Argon2id parameters for new envelopes instead of the defaults; tests
+        // use INTERACTIVE values so the suites stay short.
+        @Volatile var kdfOverride: Pair<Long, Long>? = null
     }
+
+    private val kdfOps: Long get() = testHooks.kdfOverride?.first ?: NativeBridge.PIN_OPSLIMIT_DEFAULT
+    private val kdfMem: Long get() = testHooks.kdfOverride?.second ?: NativeBridge.PIN_MEMLIMIT_DEFAULT
 
     class HookAbort(point: String) : RuntimeException("test hook $point")
 
@@ -145,6 +154,7 @@ class LockController(
             }
             if (info.mechanism != hmac.mechanism) return Result.Unopenable("MECHANISM_${info.mechanism}")
             if (!hmac.exists(info.alias)) return Result.Unopenable("KEY_MISSING")
+            val before = attempts.current()
             attempts.recordAttempt()
             testHooks.beforeStretch?.invoke()
             val t0 = System.nanoTime()
@@ -152,6 +162,10 @@ class LockController(
             val rc = deriveAndOpen(pin, info, handleOut)
             when (rc) {
                 is Result.Ok -> {}
+                is Result.NoMemory -> {
+                    attempts.restore(before)
+                    return rc
+                }
                 else -> return rc
             }
             val vault = Vault.fromHandle(dir, handleOut[0])
@@ -175,6 +189,7 @@ class LockController(
         var kek: ByteArray? = null
         try {
             val src = NativeBridge.nativePinStretch(pin, info.salt, info.opslimit, info.memlimit, kPin)
+            if (src == NativeBridge.ERR_OUT_OF_MEMORY) return Result.NoMemory
             if (src != NativeBridge.OK) return Result.Failed("stretch ${NativeBridge.errorName(src)}")
             val derived = try {
                 hmac.derive(info.alias, kPin)
@@ -217,15 +232,16 @@ class LockController(
         val kPin = ByteArray(NativeBridge.KEK_BYTES)
         var kek: ByteArray? = null
         try {
-            val src = NativeBridge.nativePinStretch(
-                pin, salt, NativeBridge.PIN_OPSLIMIT_DEFAULT, NativeBridge.PIN_MEMLIMIT_DEFAULT, kPin
-            )
+            val src = NativeBridge.nativePinStretch(pin, salt, kdfOps, kdfMem, kPin)
+            if (src == NativeBridge.ERR_OUT_OF_MEMORY) {
+                hmac.delete(alias)
+                return Result.NoMemory
+            }
             if (src != NativeBridge.OK) return Result.Failed("stretch ${NativeBridge.errorName(src)}")
             kek = hmac.derive(alias, kPin) ?: return Result.Failed("KEY_MISSING")
             val handleOut = LongArray(1)
             val rc = NativeBridge.nativeVaultCreateEnvelope3(
-                dir.absolutePath, hmac.mechanism, alias, NativeBridge.PIN_OPSLIMIT_DEFAULT,
-                NativeBridge.PIN_MEMLIMIT_DEFAULT, salt, kek, handleOut
+                dir.absolutePath, hmac.mechanism, alias, kdfOps, kdfMem, salt, kek, handleOut
             )
             if (rc != NativeBridge.OK) {
                 hmac.delete(alias)
@@ -295,15 +311,16 @@ class LockController(
         val kPin = ByteArray(NativeBridge.KEK_BYTES)
         var kek: ByteArray? = null
         try {
-            val src = NativeBridge.nativePinStretch(
-                pin, salt, NativeBridge.PIN_OPSLIMIT_DEFAULT, NativeBridge.PIN_MEMLIMIT_DEFAULT, kPin
-            )
+            val src = NativeBridge.nativePinStretch(pin, salt, kdfOps, kdfMem, kPin)
+            if (src == NativeBridge.ERR_OUT_OF_MEMORY) {
+                hmac.delete(alias)
+                return Result.NoMemory
+            }
             if (src != NativeBridge.OK) return Result.Failed("stretch ${NativeBridge.errorName(src)}")
             kek = hmac.derive(alias, kPin) ?: return Result.Failed("KEY_MISSING")
             hook("before_write")
             val rc = NativeBridge.nativeVaultWriteEnvelope3(
-                vault.rawHandle, hmac.mechanism, alias, NativeBridge.PIN_OPSLIMIT_DEFAULT,
-                NativeBridge.PIN_MEMLIMIT_DEFAULT, salt, kek
+                vault.rawHandle, hmac.mechanism, alias, kdfOps, kdfMem, salt, kek
             )
             if (rc != NativeBridge.OK) {
                 hmac.delete(alias)
@@ -357,10 +374,12 @@ class LockController(
             } catch (e: PinEnvelope.ParseException) {
                 return Result.Unopenable(NativeBridge.nativeErrorName(e.code))
             }
+            val before = attempts.current()
             attempts.recordAttempt()
             testHooks.beforeStretch?.invoke()
             val handleOut = LongArray(1)
             val check = deriveAndOpen(current, info, handleOut)
+            if (check is Result.NoMemory) attempts.restore(before)
             if (check !is Result.Ok) return check
             NativeBridge.nativeVaultClose(handleOut[0])
             attempts.reset()

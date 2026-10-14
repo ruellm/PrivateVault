@@ -133,6 +133,9 @@ std::atomic<bool> g_cancel_encrypts{false};
 #ifdef PV_DEBUG_HOOKS
 std::atomic<int> g_slow_read_ms{0};
 std::atomic<long long> g_fail_after_bytes{0};
+// Makes the PIN stretch report the code the core gives when Argon2id cannot
+// get its memory, without running the KDF.
+std::atomic<bool> g_fail_pin_stretch{false};
 #endif
 
 struct HookedSource {
@@ -685,6 +688,11 @@ Java_com_privatevault_app_NativeBridge_nativePinStretch(JNIEnv* env, jclass, jby
         return PV_ERR_INVALID_ARGUMENT;
     }
     uint8_t kek[PV_KEK_BYTES];
+#ifdef PV_DEBUG_HOOKS
+    if (g_fail_pin_stretch.load()) {
+        return PV_ERR_OUT_OF_MEMORY;
+    }
+#endif
     int rc = pv_pin_stretch(p.bytes.data(), p.bytes.size(), s.data(), s.size(),
                             static_cast<uint64_t>(opslimit), static_cast<uint64_t>(memlimit),
                             kek, sizeof(kek));
@@ -818,6 +826,13 @@ Java_com_privatevault_app_NativeBridge_nativeVaultDestroyFiles(JNIEnv* env, jcla
     std::string d = to_utf8(env, dir);
     return pv_vault_destroy_files(d.c_str());
 }
+
+#ifdef PV_DEBUG_HOOKS
+JNIEXPORT void JNICALL
+Java_com_privatevault_app_NativeBridge_nativeSetPinStretchFailure(JNIEnv*, jclass, jboolean fail) {
+    g_fail_pin_stretch.store(fail == JNI_TRUE);
+}
+#endif
 
 // Sets or clears the flag that makes every encrypt in flight fail at its next
 // read. The lock sets it while closing the vault and clears it on unlock.

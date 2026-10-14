@@ -295,6 +295,10 @@ entry point is needed); the list must begin with `unlock_pin=<pin>` or `setup_pi
 after which the rest is handed to the vault screen as before. The benchmark and release
 manifests export nothing but `LockActivity`.
 
+Alternative: keep `MainActivity` exported and let it show a lock view when locked. Rejected
+because every entry point would then need the same check, and a scripted `am start` could
+reach the vault screen class directly.
+
 ## D-020 Background detection by counting started activities, not ProcessLifecycleOwner (2026-10-14)
 
 Found in the host-driven T2 run: pressing Home while unlocked never produced the
@@ -315,6 +319,23 @@ initializer (`tools:node="merge"` on the provider, `tools:node="remove"` on the
 profileinstaller meta-data). Rejected because the counting is twenty lines, needs no
 provider, and keeps the merged manifest exactly as Phase 2 left it.
 
-Alternative: keep `MainActivity` exported and let it show a lock view when locked. Rejected
-because every entry point would then need the same check, and a scripted `am start` could
-reach the vault screen class directly.
+## D-021 Default Argon2id parameters ops 2 / 256 MiB, fallback ops 3 / 128 MiB (2026-10-14, CP-2 approved)
+
+Measured on the Xiaomi 2201116SG in the benchmark build (`docs/PHASE3A_DESIGN.md` Section
+3.3): ops 2 / 256 MiB takes 0.83 to 0.88 s per guess, ops 3 / 128 MiB 0.59 s, ops 3 / 256 MiB
+1.18 s. The Section 3.4 rule (largest memory inside 0.5 to 1.0 s, then the larger pass
+count) selects ops 2 / 256 MiB, which the developer approved as `PV_PIN_OPSLIMIT_DEFAULT`
+and `PV_PIN_MEMLIMIT_DEFAULT` (mirrored in `NativeBridge`). Six digits are then about ten
+days of single-threaded on-device work.
+
+Conditions attached to the approval: an Argon2id allocation failure during an unlock is
+reported as "not enough memory, try again" and the attempt recorded before the stretch is
+rolled back, because no guess was made (a debug-only hook forces that code so a T2 test
+covers it); the T2 lock tests make their vaults with ops 2 / 64 MiB through a test
+override so the suite stays short, and one test makes a vault with the defaults and
+checks the recorded parameters.
+
+Fallback: ops 3 / 128 MiB at 0.59 s per guess, half the memory, if 256 MiB turns out too
+large for a device in scope. The reader accepts the whole INTERACTIVE to MODERATE box, so
+changing the default later needs no format change; existing envelopes keep the parameters
+they were written with until the next PIN change rewraps them.

@@ -2,11 +2,28 @@ package com.privatevault.app
 
 import java.io.File
 import java.nio.ByteBuffer
+import java.util.concurrent.locks.ReentrantReadWriteLock
 
 // One vault under the app's private files directory. Opening it means
 // unwrapping the vault master key through the Keystore envelope and handing
-// the key bytes to the core, which keeps them in guarded memory.
+// the key bytes to the core, which keeps them in guarded memory. Every core
+// call holds the read side of a guard and close holds the write side, so a
+// lock that closes the vault waits for the call in flight and every later
+// call fails with "vault closed" instead of reaching a freed handle.
 class Vault private constructor(val dir: File, private var handle: Long) {
+
+    private val guard = ReentrantReadWriteLock()
+
+    private inline fun <T> withHandle(step: String, block: (Long) -> T): T {
+        guard.readLock().lock()
+        try {
+            val h = handle
+            if (h == 0L) throw CoreException(NativeBridge.ERR_INVALID_ARGUMENT, "$step: vault closed")
+            return block(h)
+        } finally {
+            guard.readLock().unlock()
+        }
+    }
 
     // A failed core call: the step that failed, the raw status, and the
     // platform error when the status came from a file call.
@@ -90,16 +107,22 @@ class Vault private constructor(val dir: File, private var handle: Long) {
     // Raw handle for the debug-only native helpers.
     internal val rawHandle: Long get() = handle
 
+    // Waits for any core call in flight, then wipes the key in the core.
     fun close() {
-        if (handle != 0L) {
-            NativeBridge.nativeVaultClose(handle)
-            handle = 0L
+        guard.writeLock().lock()
+        try {
+            if (handle != 0L) {
+                NativeBridge.nativeVaultClose(handle)
+                handle = 0L
+            }
+        } finally {
+            guard.writeLock().unlock()
         }
     }
 
     fun encryptSample(seed: ByteArray, length: Long, chunkSize: Int = 0): ByteArray {
         val id = ByteArray(NativeBridge.OBJECT_ID_BYTES)
-        check(NativeBridge.nativeEncryptSample(handle, seed, length, chunkSize, id), "encrypt")
+        withHandle("encrypt") { h -> check(NativeBridge.nativeEncryptSample(h, seed, length, chunkSize, id), "encrypt") }
         return id
     }
 
@@ -110,11 +133,16 @@ class Vault private constructor(val dir: File, private var handle: Long) {
     fun decryptVerify(id: ByteArray): Pair<Int, Verified?> {
         val hash = ByteArray(NativeBridge.HASH_BYTES)
         val len = LongArray(1)
-        val rc = NativeBridge.nativeDecryptVerify(handle, id, hash, len)
+        val rc = try {
+            withHandle("decrypt") { h -> NativeBridge.nativeDecryptVerify(h, id, hash, len) }
+        } catch (e: CoreException) {
+            e.code
+        }
         return if (rc == NativeBridge.OK) rc to Verified(len[0], hash) else rc to null
     }
 
-    fun objectPath(id: ByteArray): File = File(NativeBridge.nativeObjectPath(handle, id)!!)
+    fun objectPath(id: ByteArray): File =
+        withHandle("object path") { h -> File(NativeBridge.nativeObjectPath(h, id)!!) }
 
     fun listObjectIds(): List<ByteArray> {
         val objects = File(dir, "objects").listFiles() ?: return emptyList()
@@ -147,24 +175,26 @@ class Vault private constructor(val dir: File, private var handle: Long) {
         val id = ByteArray(NativeBridge.OBJECT_ID_BYTES)
         val len = LongArray(1)
         val length = buffer.remaining()
-        val rc: Int
-        val path: BufferPath
-        if (buffer.isDirect) {
-            path = BufferPath.DIRECT
-            rc = NativeBridge.nativeEncryptItem(handle, buffer, buffer.position(), length, meta.fields(), id, len)
-        } else if (buffer.hasArray()) {
-            path = BufferPath.HEAP_ARRAY
-            rc = NativeBridge.nativeEncryptItemArray(
-                handle, buffer.array(), buffer.arrayOffset() + buffer.position(), length, meta.fields(), id, len
-            )
-        } else {
-            path = BufferPath.HEAP_COPY
-            val copy = ByteArray(length)
-            buffer.duplicate().get(copy)
-            try {
-                rc = NativeBridge.nativeEncryptItemArray(handle, copy, 0, length, meta.fields(), id, len)
-            } finally {
-                copy.fill(0)
+        val path = when {
+            buffer.isDirect -> BufferPath.DIRECT
+            buffer.hasArray() -> BufferPath.HEAP_ARRAY
+            else -> BufferPath.HEAP_COPY
+        }
+        val rc: Int = withHandle("encrypt item") { h ->
+            if (path == BufferPath.DIRECT) {
+                NativeBridge.nativeEncryptItem(h, buffer, buffer.position(), length, meta.fields(), id, len)
+            } else if (path == BufferPath.HEAP_ARRAY) {
+                NativeBridge.nativeEncryptItemArray(
+                    h, buffer.array(), buffer.arrayOffset() + buffer.position(), length, meta.fields(), id, len
+                )
+            } else {
+                val copy = ByteArray(length)
+                buffer.duplicate().get(copy)
+                try {
+                    NativeBridge.nativeEncryptItemArray(h, copy, 0, length, meta.fields(), id, len)
+                } finally {
+                    copy.fill(0)
+                }
             }
         }
         check(rc, "encrypt item")
@@ -174,7 +204,9 @@ class Vault private constructor(val dir: File, private var handle: Long) {
     fun encryptItemArray(data: ByteArray, offset: Int, length: Int, meta: ItemMeta): Stored {
         val id = ByteArray(NativeBridge.OBJECT_ID_BYTES)
         val len = LongArray(1)
-        check(NativeBridge.nativeEncryptItemArray(handle, data, offset, length, meta.fields(), id, len), "encrypt item")
+        withHandle("encrypt item") { h ->
+            check(NativeBridge.nativeEncryptItemArray(h, data, offset, length, meta.fields(), id, len), "encrypt item")
+        }
         return Stored(id, len[0], BufferPath.HEAP_ARRAY)
     }
 
@@ -202,7 +234,11 @@ class Vault private constructor(val dir: File, private var handle: Long) {
         val hash = ByteArray(NativeBridge.HASH_BYTES)
         val info = LongArray(8)
         val status = IntArray(1)
-        val rc = NativeBridge.nativeDecryptVerifyItem(handle, id, hash, info, status)
+        val rc = try {
+            withHandle("decrypt item") { h -> NativeBridge.nativeDecryptVerifyItem(h, id, hash, info, status) }
+        } catch (e: CoreException) {
+            e.code
+        }
         if (rc != NativeBridge.OK) return rc to null
         val item = if (status[0] == NativeBridge.OK) ItemInfo(
             info[0].toInt(), info[1].toInt(), info[2].toInt(), info[3].toInt(), info[4], info[5], info[6].toInt()

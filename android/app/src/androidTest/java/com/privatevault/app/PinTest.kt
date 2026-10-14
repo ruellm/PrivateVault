@@ -53,8 +53,8 @@ class PinTest {
         assertEquals(NativeBridge.ERR_INVALID_ARGUMENT, NativeBridge.nativePinStretch(pin, ByteArray(15), 2L, 64L shl 20, out))
         assertEquals(NativeBridge.ERR_INVALID_ARGUMENT, NativeBridge.nativePinStretch(pin, salt, 2L, 64L shl 20, ByteArray(31)))
         assertTrue(out.all { it == 0.toByte() })
-        assertTrue(NativeBridge.PIN_OPSLIMIT_DEFAULT in NativeBridge.PIN_OPSLIMIT_MIN..NativeBridge.PIN_OPSLIMIT_MAX)
-        assertTrue(NativeBridge.PIN_MEMLIMIT_DEFAULT in NativeBridge.PIN_MEMLIMIT_MIN..NativeBridge.PIN_MEMLIMIT_MAX)
+        assertEquals(2L, NativeBridge.PIN_OPSLIMIT_DEFAULT)
+        assertEquals(256L shl 20, NativeBridge.PIN_MEMLIMIT_DEFAULT)
     }
 
     @Test

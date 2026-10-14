@@ -142,7 +142,8 @@ phone by hand. Design: `docs/PHASE3A_DESIGN.md`.
 T3 steps on a device are scripted through the `actions` extra of the debug-only
 `ScriptActivity`, which must unlock first: the list starts with `unlock_pin=<pin>` or
 `setup_pin=<pin>` (a throwaway test PIN; never a real one). Before that only
-`set_idle_ms=<ms>`, `unlock_delay_ms=<ms>`, `kdf_bench`, and `hmac_probe` are accepted.
+`set_idle_ms=<ms>`, `unlock_delay_ms=<ms>`, `kdf_bench`, and `hmac_probe` are accepted;
+right after the unlock, `change_pin=<current>:<new>` rewraps the vault.
 Results appear in logcat under the tag `PrivateVault` and on the vault screen. Force-stop
 the app before each launch. Capture actions (`capture_photo`,
 `capture_photo_n=<n>`, `flip`, `memory`, `video_probe`, `v2_probe`, `test_hook_slow=<ms>`,

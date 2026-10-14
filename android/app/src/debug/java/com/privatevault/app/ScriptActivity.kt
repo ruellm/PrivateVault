@@ -39,6 +39,8 @@ class ScriptActivity : Activity() {
             while (i < names.size) {
                 val n = names[i]
                 when {
+                    // Unlocked: everything but a PIN change goes to the vault screen.
+                    entered && !n.startsWith("change_pin=") -> break
                     n.startsWith("set_idle_ms=") -> {
                         lock.idleTimeoutMs = n.substringAfter('=').toLong()
                         Log.i(TAG, "script: idle timeout ${lock.idleTimeoutMs} ms")
@@ -50,6 +52,24 @@ class ScriptActivity : Activity() {
                         val ms = n.substringAfter('=').toLong()
                         lock.testHooks.beforeStretch = { Thread.sleep(ms) }
                         Log.i(TAG, "script: unlock delayed by $ms ms before the stretch")
+                    }
+                    // change_pin=<current>:<new> after an unlock_pin; rewraps the vault.
+                    n.startsWith("change_pin=") && entered -> {
+                        val parts = n.substringAfter('=').split(':')
+                        val old = parts[0].toByteArray(Charsets.US_ASCII)
+                        val new = parts.getOrElse(1) { parts[0] }.toByteArray(Charsets.US_ASCII)
+                        val r = try {
+                            lock.changePin(old, new)
+                        } finally {
+                            old.fill(0)
+                            new.fill(0)
+                        }
+                        Log.i(TAG, "script: change_pin ${r.describe()}; lock state ${lock.state}, attempts ${lock.attempts.failures}")
+                        if (r !is LockController.Result.Ok) {
+                            Log.i(TAG, "[scripted] all actions finished")
+                            runOnUiThread { finish() }
+                            return@execute
+                        }
                     }
                     n.startsWith("unlock_pin=") || n.startsWith("setup_pin=") -> {
                         val pin = n.substringAfter('=').toByteArray(Charsets.US_ASCII)
@@ -66,8 +86,6 @@ class ScriptActivity : Activity() {
                             runOnUiThread { finish() }
                             return@execute
                         }
-                        i++
-                        break
                     }
                     else -> {
                         Log.i(TAG, "script refused: first action must be unlock_pin or setup_pin (got $n)")

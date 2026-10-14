@@ -5,13 +5,15 @@ command that was run; nothing is inferred. "Not verified" means exactly that.
 
 ## Status
 
-**Partially complete.** The core additions (T1) and the Android PIN lock (T2, instrumented
-and host-driven) pass on Windows and the emulator. The physical device tier (T3) did not
-run: the Xiaomi was attached for part of the session but had gone again when the final
-build was ready for its install, and every install on it needs the developer's tap. The
-Milestone A phone measurements (Argon2id timing, Keystore HMAC level) are therefore still
-open, and the default Argon2id parameters (CP-2) stay provisional. Section "T3" lists the
-exact steps left. Four defects were found by the test runs and fixed (Section "Defects").
+**Complete.** The core additions (T1) and the Android PIN lock (T2, instrumented and
+host-driven) pass on Windows and the emulator, and the device tier (T3) ran on the Xiaomi
+2201116SG on 2026-10-14 with the developer providing the install taps and the manual
+actions: the provider 2 vault migrated in place, every object verifies, captures, wrong-PIN
+delays, the lock triggers, and the recents card behave as designed. The Argon2id default
+was settled from the benchmark-build measurement on the phone (CP-2: ops 2 / 256 MiB,
+D-021) and the phone vault was rewrapped with it and verified again. Five defects were found
+by the test runs and fixed (Section "Defects"), one of them on the phone. The vault on the
+phone was not erased (55 objects remain).
 
 ## Environment
 
@@ -21,13 +23,13 @@ exact steps left. Four defects were found by the test runs and fixed (Section "D
 | New Android dependency | `androidx.test:core` 1.6.1 (`androidTest` only). `lifecycle-process` 2.6.2 was added and removed again (D-020). |
 | App version | 0.3.0 (`versionCode` 3) |
 | Emulator | 37.2.12, `Pixel_8_API_35` (Android 15, x86_64), Keystore `SOFTWARE`, no screen lock except during the PIN procedure |
-| Device | Xiaomi 2201116SG: not available for this tier (see T3) |
+| Device | Xiaomi 2201116SG (veux), Android 13, MIUI 14, arm64-v8a, Keystore `TRUSTED_ENVIRONMENT`, no StrongBox, no screen lock; shell input injection refused (`INJECT_EVENTS`) |
 
 ## Architecture changes
 
 - **Core (additive, Android-free):** error code 24 `PV_ERR_ENVELOPE_NO_SLOT`; PIN
-  stretching (`pv_pin_stretch`, bounds INTERACTIVE to MODERATE, defaults ops 3 / 64 MiB
-  provisional); `pv_pin_salt_generate`; delay arithmetic (`pv_pin_delay_ms`,
+  stretching (`pv_pin_stretch`, bounds INTERACTIVE to MODERATE, defaults ops 2 / 256 MiB,
+  D-021); `pv_pin_salt_generate`; delay arithmetic (`pv_pin_delay_ms`,
   `pv_pin_remaining_ms`); envelope provider 3 (`pv_envelope3_parse`, `seal`, `open`) with
   slots, a PIN slot carrying mechanism, alias, Argon2id parameters, salt, nonce, and the
   wrapped VMK, and additional data equal to the whole envelope with every wrapped field
@@ -47,7 +49,7 @@ exact steps left. Four defects were found by the test runs and fixed (Section "D
   background (activity count, 700 ms), screen off, 5 min idle, manual; a process always
   starts locked.
 - **Design and decisions:** `docs/PHASE3A_DESIGN.md` (approved with four changes, Section 18
-  lists the implementation deltas), D-016 to D-020, `docs/THREAT_MODEL.md` Section 7.
+  lists the implementation deltas), D-016 to D-021, `docs/THREAT_MODEL.md` Section 7.
 
 ## Build and tests
 
@@ -76,7 +78,8 @@ the commands are also in `docs/PHASE3A_PROGRESS.md` and `README.md`).
 ### T1, host automated (Windows, CTest)
 
 Before any change: 14/14 Debug and Release. After Milestone C: Debug **16 passed, 0
-failed** (35 s), Release **16 passed** (15 s). No warnings at `/W4`.
+failed** (35 s), Release **16 passed** (15 s). Final run with the approved defaults (CP-2):
+Debug **16 passed** (55 s), Release **16 passed** (17 s). No warnings at `/W4`.
 
 | Test | Covers | Result |
 |---|---|---|
@@ -87,15 +90,17 @@ failed** (35 s), Release **16 passed** (15 s). No warnings at `/W4`.
 
 ### T2, Android automated (emulator)
 
-Final run: **51 tests, 0 failures, 0 errors, 1 skipped** (`LockBoundKeyTest`, run
-separately with a PIN, below). The 31 Phase 1 and 2 tests are unchanged and pass.
+Final run with the approved defaults: **53 tests, 0 failures, 0 errors, 1 skipped**
+(`LockBoundKeyTest`, run separately with a PIN, below), 132 s. The 31 Phase 1 and 2 tests
+are unchanged and pass. Earlier full runs: 51 tests after Milestone D (two of them passed,
+one later run failed only `LeakScanTest` on test-runner rows, Section "Defects").
 
 | Class | Tests | Result |
 |---|---|---|
 | PinTest (new) | stretch equals the fixture `k_pin`; bounds refused in under 100 ms; argument checks; salts fresh; delay table; remaining time cases | Pass (3) |
 | Envelope3Test (new) | create, parse, object, second create refused, wrong KEK, rewrap under another KEK and alias, stale partial, flipped byte, flipped provider, destroy twice; parse errors without running (truncated, trailing, empty, no slot, bad KDF); the two committed envelope vectors opened through the vault form beside the `one_byte` object vector, which verifies | Pass (3) |
 | KeystoreHmacTest (new) | fresh aliases, create, level, mode, deterministic MAC, other key gives other MAC, alias listing, delete, `NO_KEY` | Pass (1) |
-| LockTest (new) | setup, four free wrong PINs then a delay, refused attempts do not count, delay survives a new policy object, delays with injected clocks (forward, back, reboot), attempt recorded before the stretch and left counted when the stretch aborts, PIN change rotates the key and the old PIN stops working, migration from a provider 2 vault, migration interrupted at each of four points (old or new envelope, never neither; leftovers removed), PIN change interrupted at each point, Keystore key deleted gives `KEY_MISSING` without counting and erase recovers, lock during a slowed capture cancels it in 242 ms and leaves no partial, capture refused while locked, erase from unlocked, interrupted erase finished at the next start, `PinBuffer` | Pass (10) |
+| LockTest (new) | setup, four free wrong PINs then a delay, refused attempts do not count, delay survives a new policy object, delays with injected clocks (forward, back, reboot), attempt recorded before the stretch and left counted when the stretch aborts, PIN change rotates the key and the old PIN stops working, migration from a provider 2 vault, migration interrupted at each of four points (old or new envelope, never neither; leftovers removed), PIN change interrupted at each point, Keystore key deleted gives `KEY_MISSING` without counting and erase recovers, lock during a slowed capture cancels it in 242 ms and leaves no partial, capture refused while locked, erase from unlocked, interrupted erase finished at the next start, `PinBuffer`; a vault made with the defaults records ops 2 / 256 MiB; a forced allocation failure in the stretch is reported as `NoMemory`, rolls the pre-recorded attempt and delay back, and leaves a PIN change unlocked (CP-2 conditions). The other lock tests make their vaults at ops 2 / 64 MiB through the test override | Pass (12) |
 | LockScreenTest (new) | `FLAG_SECURE` on the lock activity window; the vault screen destroys itself when launched locked | Pass (2) |
 | Phase 1 and 2 classes | 31 | Pass (30, 1 skipped) |
 
@@ -133,29 +138,39 @@ software-backed, so this exercises the code path only. **Pass (code path).**
 
 Emulator figures in `docs/PHASE3A_DESIGN.md` Section 3.3 (benchmark build: ops 2 / 64 MiB
 156 to 349 ms, ops 3 / 256 MiB 452 to 908 ms, noisy; HMAC key `SOFTWARE`, MAC 1 ms).
-**Xiaomi: not measured** (phone not attached when the build was ready). The default
-parameters ops 3 / 64 MiB are therefore provisional (CP-2).
+Xiaomi figures, debug and benchmark builds: the two rows of design Section 3.3 and the
+"Argon2id, debug build" and "Benchmark build" rows of the T3 table below. The default
+parameters follow from them (CP-2, D-021: ops 2 / 256 MiB).
 
-### T3, device (Xiaomi 2201116SG)
+### T3, device (Xiaomi 2201116SG, 2026-10-14, second session)
 
-**Not run.** The phone was attached for part of the session and gone when the final debug
-APK was ready; the install attempt returned `device not found`. Remaining steps, each
-install needing the developer's tap, with `build/p3a/phone-p3a.sh` as the driver
-(`install-debug`, `bench`, `migrate <pin>`, `unlock <pin>`, `wrong <pin>`, `capture <pin>`,
-`install-benchmark`, `logcat`):
+Debug APK installed by the developer (MIUI tap). Runs driven over adb through the debug-only
+`ScriptActivity` with logcat streamed to a file (`build/p3a/phone-p3a.sh`, outputs under
+`build/p3a/phone/`, not committed). MIUI refuses shell input injection (`INJECT_EVENTS`),
+so Home, power, the system camera, and recents were operated by the developer by hand while
+the log streamed; activities launched behind a dozing screen are stopped at once and lock
+the vault, so every scripted step needed the screen on. The throwaway PIN is not recorded.
 
-1. Install the debug APK; run `kdf_bench,hmac_probe` through `ScriptActivity` (no vault
-   touched); fill the phone rows of design Section 3.3 and settle CP-2.
-2. `setup_pin=<throwaway>` with `verify_all`: migrates the 52-object provider 2 vault in
-   place and verifies every object; expect `vault migrated to provider 3`, `provider 2 key
-   present: false`, `verify_all: 52 of 52 ok`.
-3. Unlock time: the `lock: unlocked in N ms` line (debug); then the benchmark APK
-   (second tap), PIN typed on the lock screen, same line.
-4. Background, screen off, and the MIUI camera kill case: expect the lock screen on return.
-5. Five wrong PINs on the keypad: the countdown appears; a sixth attempt is refused.
-6. Recents card with the lock screen in front.
-7. `unlock_pin=<pin>,capture_photo_n=3,verify_all,list,leak_scan` (debug build).
-8. Erase only if the developer agrees.
+| Step | Result on the phone |
+|---|---|
+| Migration of the provider 2 vault (`setup_pin`) | `vault migrated to provider 3, not lock-bound, strongbox=false`; `provider 2 key present: false`; `objects dir: 52 entries` |
+| Unlock and verify (debug build) | `lock: unlocked in 4767 ms`; `verify_all: 52 of 52 ok` (39 s, two 100 MB objects included); a later unlock 4714 and 4759 ms |
+| Wrong-PIN delays | five scripted wrong PINs: attempts 1 to 4 free, the fifth reports `wait 26 s`; the right PIN during the delay is refused with `wait 23 s` |
+| Phase 2 captures while unlocked | three captures at 2448x3264, 2.85 to 2.87 MB JPEG, `buffer=DIRECT`, encrypt 133 to 148 ms, `verify=ok` each; `verify_all: 55 of 55 ok`; `leak_scan: 0 findings, 60 files scanned` |
+| Background (Home) | `locking (background)`, `locked`; reopening showed the lock screen |
+| Screen off (power button) | locked through the activity-stop path (`locking (background)` 700 ms after the screen went off, before any screen-off broadcast reached the app); MIUI then killed the process (`SwipeUpClean`) and the relaunch started `LockActivity` |
+| MIUI camera case (Home, system camera, Home, reopen) | locked on the Home press; the process was not killed this time (the system camera was already warm and the app had no camera bound), and the return showed the lock screen. The Phase 2 kill was not reproduced; locked either way |
+| Recents card with the lock screen in front | blank white card (`build/p3a/phone/P-recents.png`) |
+| Rewrap after CP-2 (`unlock_pin`, `change_pin` to the same throwaway PIN, verify) | `change_pin ok`; the envelope pulled afterwards parses as provider 3, one PIN slot, mechanism 1, ops 2 / 256 MiB, 157 bytes; `verify_all: 55 of 55 ok` (40 s); the app was then force-stopped, so the vault is locked |
+| Keystore HMAC key | `TRUSTED_ENVIRONMENT`, not lock-bound (no screen lock), no StrongBox |
+| Argon2id, debug build | design Section 3.3: ops 2 / 64 MiB 3.1 s, ops 3 / 64 MiB 4.7 s, up to 18.8 s at ops 3 / 256 MiB |
+| Benchmark build (installed with a second tap) | Diagnostics from the lock screen: ops 2 / 64 MiB 203 to 232 ms, ops 3 / 64 MiB 288 ms, ops 3 / 128 MiB 586 ms, ops 2 / 256 MiB 833 to 876 ms, ops 3 / 256 MiB 1181 to 1183 ms; HMAC key `TRUSTED_ENVIRONMENT`, MAC 18 to 23 ms; unlock with the keypad under the provisional ops 3 / 64 MiB: `lock: unlocked in 348 ms` |
+| Erase | not run (developer decision) |
+
+Defect found on the phone and fixed during this tier: the lock closed the vault handle under
+a running `verify_all` (Section "Defects"). The migration run that exposed it ended with
+`verify_all: 1 of 52` and 51 `INVALID_ARGUMENT` lines; after the fix the same vault verified
+52 of 52.
 
 ## Defects found and fixed
 
@@ -170,30 +185,55 @@ install needing the developer's tap, with `build/p3a/phone-p3a.sh` as the driver
   counting in `PvApp` (D-020); the `lifecycle-process` dependency was removed again.
 - Two test expectations were wrong (remaining delay is read after the stretch; the clock-back
   case keeps the larger estimate).
+- Found on the Xiaomi (T3 migration step): the background lock fired while `verify_all`
+  was decrypting a 100 MB object on the vault screen's worker thread (the phone screen
+  was off, so the launched activities stopped at once). The lock closed and freed the core
+  handle under the running decrypt; the decrypt completed on the freed handle and the
+  remaining 51 objects failed closed with `INVALID_ARGUMENT`. The drain only covered the
+  capture queue. Fixed: `Vault` holds a read-write guard, every core call takes the read
+  side, `close()` takes the write side and waits, later calls report "vault closed";
+  `verify_all` stops when the vault is locked. T2 was rerun on the emulator after the fix:
+  50 of 51 pass, with `LeakScanTest.scanFindsNothingBeforeAndAfterCaptures` failing on two
+  MediaStore rows, `Android/media/com.privatevault.app` and its child
+  `additional_test_output`. That directory is created on the device by the Android Gradle
+  plugin test runner for test output, not by the app. Shown in isolation
+  (`build/p3a/leak-only.sh`): on a freshly booted emulator `Android/media` is empty, the
+  class passes 3/3 on its own, and creating that directory by hand and rescanning
+  reproduces exactly the two rows and the failure. The earlier full runs passed because the
+  media scanner had not indexed the directory before the test ran. The scan behaves as
+  designed; the row is test-runner state. Not an app defect; no code change.
 
 ## Known limits and unresolved risks
 
-- T3 and the phone measurements are outstanding; CP-2 is provisional.
+- On the phone the idle (5 min) and manual lock triggers were not exercised by hand; they
+  are covered on the emulator. Erase was not run on the phone (developer decision).
+- The MIUI camera kill of Phase 2 was not reproduced this time (the system camera was
+  already running and the app had no camera bound); the lock screen appeared either way.
+- The debug build takes about 12.5 s per stretch at the approved defaults on the phone and
+  3.5 to 5 s on the emulator; the benchmark build 0.85 s. Unlock times quoted for the
+  debug build include that.
 - A Keystore refusal during an unlock (lock-bound key with the device locked) counts as an
   attempt, because the record precedes the stretch (design Section 13).
 - Kotlin copies of the PIN digits, `k_pin`, and `kek` exist briefly in the managed heap; the
   provider 2 migration still passes the VMK through Kotlin once.
 - The delays are app-enforced; root resets them. No hardware attempt counter.
-- Argon2id allocates `memlimit` once per unlock; the default of 64 MiB was chosen with the
-  phone capture peak of about 50 MB in mind and has not been measured on the phone.
+- Argon2id allocates `memlimit` once per setup, unlock, or PIN change; the default is
+  256 MiB (D-021), measured on the phone in all three operations (setup through the
+  migration, unlock, and the scripted PIN change) without a failure. A device that cannot
+  give it reports "not enough memory" and the attempt is not counted.
 - The construction has not been independently reviewed.
 
 ## Phase 3A acceptance checklist (brief Section 8)
 
 | # | Criterion | Result |
 |---|---|---|
-| 1 | Phase 1 and 2 T1 and T2 suites pass | Pass (T1 14/14 before and 16/16 after; T2 31 of the 51, 1 skipped as in Phase 2) |
+| 1 | Phase 1 and 2 T1 and T2 suites pass | Pass (T1 14/14 before and 16/16 after; T2 31 of the 53, 1 skipped as in Phase 2) |
 | 2 | Provider 3 vault opens only with the correct PIN; VMK never crosses JNI; tampered envelope and missing Keystore key fail closed | Pass on the emulator (T1 tamper per field and slot; T2 wrong PIN, flipped byte, deleted alias); the VMK crosses JNI only in the provider 2 migration |
 | 3 | Migration and PIN change survive interruption at every step | Pass (T2 hooks at four points each; T1 stale partial and failed write) |
-| 4 | Lock triggers per P3-4 on emulator and Xiaomi; capture blocked while locked | Pass on the emulator (background, screen off, idle, manual, process restart; capture refused and cancelled); **not verified on the Xiaomi** |
+| 4 | Lock triggers per P3-4 on emulator and Xiaomi; capture blocked while locked | Pass on the emulator (background, screen off, idle, manual, process restart; capture refused and cancelled) and on the Xiaomi (Home, screen off, the camera case, process restart all end on the lock screen; the idle and manual triggers were not exercised by hand on the phone) |
 | 5 | Attempt delays per P3-5, persistent across restarts and clock changes | Pass (T2 instrumented and host: kill during unlock, clock forward, new policy object; reboot by injected boot count) |
 | 6 | Erase from the lock screen; interrupted erase leaves nothing readable | Pass (T2: erase from locked and unlocked, pending flag finishes an interrupted erase at the next start); the lock screen flow itself is manual UI, exercised through the controller |
-| 7 | Core changes additive and Android-free; golden vectors decrypt on both platforms | Pass (two envelope vectors and the `k_pin` answer check on Windows and the emulator) |
+| 7 | Core changes additive and Android-free; golden vectors decrypt on both platforms | Pass (two envelope vectors and the `k_pin` answer check on Windows and the emulator; on the phone the migrated vault and the rewrapped envelope open and all objects verify) |
 | 8 | Threat model updated | Pass (`docs/THREAT_MODEL.md` Section 7) |
 | 9 | Report separates demonstrated facts from assumptions | Pass (this document) |
 
@@ -214,31 +254,30 @@ install needing the developer's tap, with `build/p3a/phone-p3a.sh` as the driver
   `app/src/debug/java/com/privatevault/app/ScriptActivity.kt` (new),
   `app/src/androidTest/.../{PinTest,Envelope3Test,KeystoreHmacTest,LockTest,LockScreenTest}.kt` (new).
 - `docs/`: `PHASE3A_DESIGN.md`, `PHASE3A_PROGRESS.md`, this report (new); `DECISIONS.md`
-  (D-016 to D-020), `DEPENDENCIES.md`, `THREAT_MODEL.md`, `ROADMAP.md`.
+  (D-016 to D-021), `DEPENDENCIES.md`, `THREAT_MODEL.md`, `ROADMAP.md`.
 
 ## Suggested commit message
 
+For the T3 session, on top of the Phase 3A commit:
+
 ```
-Phase 3A: PIN lock and PIN-derived vault key
+Phase 3A T3 on the Xiaomi: handle guard, CP-2 defaults, phone results
 
-Core: envelope provider 3 with PIN slots (Argon2id stretch, device-bound
-KEK, XChaCha20-Poly1305 wrap, additional data over the whole masked
-envelope), vault create/open/write forms that keep the VMK inside the
-core, destroy_files, wrong-PIN delay arithmetic, error code 24. Two
-envelope golden vectors with the recorded stretch answer. T1 16/16.
+The lock closed the core handle under a running verify_all on the vault
+screen; Vault now holds a read-write guard, close waits for the call in
+flight and later calls report "vault closed", verify_all stops when locked.
 
-Android: lock screen with an in-app keypad as the only exported activity,
-LockController (unlock, setup, in-place migration of the provider 2 vault,
-PIN change with a fresh Keystore HMAC key per rewrap, lock on background,
-screen off, idle and manual with encrypt cancel, erase with a pending
-flag), attempt counter recorded before the stretch, debug-only script
-entry. T2 51 tests on the emulator, host-driven lock, kill, clock and
-manifest checks, lock-bound mode with an emulator PIN.
+Argon2id defaults settled from the benchmark build on the phone (D-021):
+opslimit 2, memlimit 256 MiB, 0.83 to 0.88 s per guess. An allocation
+failure in the stretch is reported as "not enough memory" and rolls the
+pre-recorded attempt back (debug hook and T2 test); lock tests make their
+vaults at ops 2 / 64 MiB through a test override, one test checks the
+defaults. Script entry gains change_pin.
 
-Docs: design (approved with four changes), D-016 to D-020, threat model
-Section 7, dependencies, progress, test report. T3 on the Xiaomi and the
-phone KDF timing are still open; the default Argon2id parameters stay
-provisional.
+Phone: provider 2 vault migrated in place, 52 then 55 objects verified,
+wrong-PIN delays, captures, Home, screen off, camera case, recents card;
+rewrapped with the final defaults and verified again. T1 16/16, T2 53
+tests. Test report, design Section 18, progress, decisions updated.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 ```

@@ -34,11 +34,17 @@ class LockTest {
     private val wrong = "135791".toByteArray(Charsets.US_ASCII)
     private val other = "99887766".toByteArray(Charsets.US_ASCII)
 
+    // INTERACTIVE parameters for the vaults these tests make, so the suite
+    // stays short; defaultsAreRecorded checks the real defaults once.
+    private val testKdf = 2L to (64L shl 20)
+
     @Before
     fun setUp() {
         lock.testHooks.failAt = null
         lock.testHooks.beforeStretch = null
+        lock.testHooks.kdfOverride = testKdf
         NativeBridge.nativeSetTestHooks(0, 0)
+        NativeBridge.nativeSetPinStretchFailure(false)
         if (lock.state == LockState.UNLOCKED) lock.lock("test")
         lock.erase()
         assertEquals(LockState.NO_VAULT, lock.state)
@@ -48,7 +54,9 @@ class LockTest {
     fun tearDown() {
         lock.testHooks.failAt = null
         lock.testHooks.beforeStretch = null
+        lock.testHooks.kdfOverride = null
         NativeBridge.nativeSetTestHooks(0, 0)
+        NativeBridge.nativeSetPinStretchFailure(false)
         if (lock.state == LockState.UNLOCKED) lock.lock("test")
         lock.erase()
     }
@@ -351,6 +359,51 @@ class LockTest {
         assertEquals(LockState.NO_VAULT, lock.state)
         assertFalse(lock.erasePending)
         assertEquals(0, lock.hmac.aliases().size)
+    }
+
+    // A vault made without the override carries the approved defaults.
+    @Test
+    fun defaultsAreRecorded() {
+        lock.testHooks.kdfOverride = null
+        assertTrue(lock.setup(pin) is LockController.Result.Ok)
+        val info = PinEnvelope.parse(File(lock.dir, Vault.KEY_FILE).readBytes())
+        assertEquals(2L, info.opslimit)
+        assertEquals(256L shl 20, info.memlimit)
+        assertEquals(NativeBridge.PIN_OPSLIMIT_DEFAULT, info.opslimit)
+        assertEquals(NativeBridge.PIN_MEMLIMIT_DEFAULT, info.memlimit)
+        lock.lock("test")
+        assertTrue(lock.unlock(pin) is LockController.Result.Ok)
+        Log.i("PrivateVaultTest", "unlock with the defaults took ${lock.lastUnlockMs} ms (debug build)")
+    }
+
+    // An allocation failure in the stretch is not a guess: the pre-recorded
+    // attempt is rolled back, including an active delay.
+    @Test
+    fun allocationFailureIsNotAGuess() {
+        assertTrue(lock.setup(pin) is LockController.Result.Ok)
+        lock.lock("test")
+        assertTrue(lock.unlock(wrong) is LockController.Result.WrongPin)
+        assertEquals(1, lock.attempts.failures)
+        val before = lock.attempts.current()
+        NativeBridge.nativeSetPinStretchFailure(true)
+        val r = lock.unlock(pin)
+        assertTrue(r.describe(), r is LockController.Result.NoMemory)
+        assertEquals(1, lock.attempts.failures)
+        val after = lock.attempts.current()
+        assertEquals(before.delayMs, after.delayMs)
+        assertEquals(before.failElapsedMs, after.failElapsedMs)
+        assertEquals(before.failWallMs, after.failWallMs)
+        assertEquals(LockState.LOCKED, lock.state)
+        NativeBridge.nativeSetPinStretchFailure(false)
+        assertTrue(lock.unlock(pin) is LockController.Result.Ok)
+        assertEquals(0, lock.attempts.failures)
+        // The same during a PIN change: the counter is untouched and the vault stays unlocked.
+        NativeBridge.nativeSetPinStretchFailure(true)
+        assertTrue(lock.changePin(pin, other) is LockController.Result.NoMemory)
+        assertEquals(0, lock.attempts.failures)
+        assertEquals(LockState.UNLOCKED, lock.state)
+        NativeBridge.nativeSetPinStretchFailure(false)
+        assertTrue(lock.changePin(pin, other) is LockController.Result.Ok)
     }
 
     @Test

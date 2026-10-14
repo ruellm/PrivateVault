@@ -3,23 +3,45 @@
 Working log for Claude Code sessions. Updated after each milestone. Newest state first.
 Brief: `PHASE3A_BRIEF.md` (repository root, supplied by the developer).
 
-## Current state (2026-10-14, end of the session)
+## Current state (2026-10-14, end of the second session)
 
-Milestones A to D done on Windows and the emulator: T1 16/16 Debug and Release, T2 51
-tests (0 failures, 1 skipped without a PIN; passed in the PIN run), host-driven lock, kill,
-clock, manifest, and leak checks, lock-bound mode with an emulator PIN. Milestone E: docs
-and `docs/PHASE3A_TEST_REPORT.md` written; T3 on the Xiaomi and the two phone measurements
-did not run (the phone was attached for part of the session and gone when the final APK
-was ready; `adb install` returned `device not found`). Nothing is committed; the suggested
-commit message is at the end of the test report. The emulator was stopped.
+Stage 3A complete. The first session's work (Milestones A to E on Windows and the
+emulator) was committed by the developer as `433d73a`. The second session ran T3 on the
+Xiaomi, found and fixed the handle-guard defect, settled CP-2 (ops 2 / 256 MiB, D-021) with
+its three conditions, rewrapped the phone vault with the final defaults, and reran T1
+(16/16 Debug and Release) and T2 (53 tests, 0 failures, 1 skipped). Results in
+`docs/PHASE3A_TEST_REPORT.md`; the second session's changes are uncommitted, with a commit
+message at the end of the report. The phone vault was not erased (55 objects); the app on
+the phone is the debug build 0.3.0, locked. The emulator was stopped.
 
-Open for the developer:
+## Second session log (2026-10-14, T3 on the Xiaomi)
 
-1. Attach the Xiaomi and tap the installs: `build/p3a/phone-p3a.sh install-debug`, then
-   `bench` (fills design Section 3.3 and settles CP-2), `migrate <throwaway pin>` (the
-   52-object vault, verify all), the remaining T3 steps in the test report, then
-   `install-benchmark` for the benchmark unlock time and the lock-screen Diagnostics button.
-2. CP-2 (default Argon2id parameters, provisional ops 3 / 64 MiB) after that run.
+Order followed as the developer asked, one tap per install: `install-debug`; `bench`
+(debug row of design Section 3.3); `migrate` with the throwaway PIN (found the handle-guard
+defect: the screen was dozing, the launched activities were stopped at once, the lock
+closed the handle under `verify_all`; fixed in `Vault.kt`, `ObjectActions.kt`, rebuilt, T2
+rerun); debug reinstall; unlock and verify 52 of 52; `wrong` (delays); `capture` (three
+photos, 55 of 55, leak scan 0); Home, screen off, camera case, recents by the developer's
+hand with the log streamed (MIUI refuses `input keyevent` from the shell); benchmark
+install and the Diagnostics button on the lock screen (benchmark row, unlock 348 ms); CP-2
+proposed by the Section 3.4 rule and approved with conditions; constants, `NoMemory`
+result with rollback and the `nativeSetPinStretchFailure` hook, `kdfOverride` for the
+tests, `defaultsAreRecorded` and `allocationFailureIsNotAGuess`, D-021; T1 and the
+Android build with T2; debug reinstall; `change_pin` by script and `verify_all: 55 of 55`;
+the pulled envelope parses as ops 2 / 256 MiB.
+
+```
+build/p3a/phone-p3a.sh install-debug | bench | migrate <pin> | unlock <pin> | wrong <pin> | capture <pin> | install-benchmark
+adb -s 9c4424ba81c6 shell am start -W -n com.privatevault.app/.ScriptActivity --es actions unlock_pin=<pin>,change_pin=<pin>:<pin>,open,list,verify_all
+cmake --build --preset windows-x64-tests-debug; ctest --preset windows-x64-tests-debug      # 16/16
+cmake --build --preset windows-x64-tests-release; ctest --preset windows-x64-tests-release  # 16/16
+cd android; gradlew.bat assembleDebug assembleDebugAndroidTest lintDebug assembleBenchmark; gradlew.bat connectedDebugAndroidTest   # 53 tests, 0 failures, 1 skipped
+```
+
+Emulator T2 runs in between: 50 of 51 once with `LeakScanTest` failing on the Gradle
+runner's `additional_test_output` rows under `Android/media` (shown in isolation to be the
+runner directory, `build/p3a/leak-only.sh`; not an app defect), then 53 of 53 with the
+final code.
 
 ## Checkpoint (2026-10-14)
 

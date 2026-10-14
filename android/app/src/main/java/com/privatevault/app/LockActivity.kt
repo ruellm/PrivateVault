@@ -363,6 +363,10 @@ class LockActivity : Activity(), LockController.Listener {
                 unopenableReason = r.reason
                 enterPhase(Phase.UNOPENABLE)
             }
+            is LockController.Result.NoMemory -> {
+                enterPhase(if (before == Phase.CHANGE_CURRENT || before == Phase.CHANGE_CONFIRM) Phase.CHANGE_CURRENT else if (before == Phase.SETUP_CONFIRM) Phase.SETUP_FIRST else Phase.ENTER)
+                message.text = "Not enough memory, try again"
+            }
             is LockController.Result.Failed -> {
                 enterPhase(if (before == Phase.BUSY) Phase.ENTER else before)
                 if (phase == Phase.SETUP_CONFIRM) enterPhase(Phase.SETUP_FIRST)

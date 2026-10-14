@@ -18,6 +18,10 @@ object ObjectActions {
         if (ids.isEmpty()) say("no objects")
         var ok = 0
         for (id in ids) {
+            if (!v.isOpen) {
+                say("verify_all stopped: vault locked")
+                break
+            }
             val hex = NativeBridge.hex(id)
             val (rc, result) = v.decryptVerifyItem(id)
             if (rc != NativeBridge.OK || result == null) {

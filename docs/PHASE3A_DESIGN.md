@@ -3,8 +3,8 @@
 Status: proposed 2026-10-14 for the Milestone B checkpoint; approved by the developer the
 same day with four changes, all applied below (attempt counting before the stretch in 4.1
 and 8, the debug-only script entry point in 5 and 9, the wording of the same-boot rule in 8,
-and the one-step vault creation in 2.3, 4.2, 11, 15). CP-2 stays provisional until the Xiaomi
-run. Items marked **P3-x** are the decisions in `PHASE3A_BRIEF.md` Section 3; items marked
+and the one-step vault creation in 2.3, 4.2, 11, 15). CP-2 approved on the Xiaomi benchmark
+measurement (D-021). Items marked **P3-x** are the decisions in `PHASE3A_BRIEF.md` Section 3; items marked
 **CP-n** are the choices this document made beyond the brief (Section 14).
 Nothing here changes the version 1 object format, the item header, or the behaviour of
 envelope providers 1 and 2.
@@ -148,23 +148,20 @@ libsodium interactive preset. The constants are `PV_PIN_OPSLIMIT_MIN/MAX` and
 |---|---|---|---|---|---|---|
 | Emulator Pixel_8_API_35, debug | 2238, 987, 991 | 1590, 1191, 1202 | 2246, 1692, 1601 | 3156, 2565, 2699 | 3555, 3223, 3446 | 5050, 5395, 4821 |
 | Emulator Pixel_8_API_35, benchmark | 349, 253, 156 | 285, 164, 111 | 238, 957, 224 | 486, 630, 279 | 618, 549, 367 | 908, 539, 452 |
-| Xiaomi 2201116SG, debug | not measured: phone not attached on 2026-10-14 | | | | | |
-| Xiaomi 2201116SG, benchmark | not measured: phone not attached on 2026-10-14 | | | | | |
+| Xiaomi 2201116SG, debug | 3211, 3098, 3182 | 4666, 4666, 4669 | 6263, 6208, 6231 | 9399, 9376, 9361 | 12519, 12531, 12518 | 18773, 18801, 18770 |
+| Xiaomi 2201116SG, benchmark | 232, 203, 204 | 288, 288, 287 | 413, 410, 410 | 586, 586, 585 | 876, 833, 849 | 1183, 1182, 1181 |
 
 Times in milliseconds, three runs each. The debug variant builds the native code without
 optimisation; the benchmark variant is the figure that matters (brief, Section 4.1). The
 emulator runs on the host CPU (Core i7-10750H under WHPX) and its times vary by a factor of
 two to four between runs of the same pair, so they bound nothing on the phone; they show
 only that the whole range runs and that the bounds check refuses ops 1 and 512 MiB before
-the KDF (`PV_ERR_ENVELOPE_KDF_PARAMS` in both builds). The phone rows are filled in when the
-developer attaches the Xiaomi (debug APK, then the benchmark APK, each with a tap):
-
-```
-adb -s 9c4424ba81c6 install -r android\app\build\outputs\apk\debug\app-debug.apk
-adb -s 9c4424ba81c6 shell am start -n com.privatevault.app/.MainActivity --es actions kdf_bench,hmac_probe
-adb -s 9c4424ba81c6 logcat -d -s PrivateVault:I
-adb -s 9c4424ba81c6 install -r android\app\build\outputs\apk\benchmark\app-benchmark.apk
-```
+the KDF (`PV_ERR_ENVELOPE_KDF_PARAMS` in both builds). The phone rows were measured on
+2026-10-14 (second session): the debug row through `ScriptActivity` (`kdf_bench,hmac_probe`),
+the benchmark row through the Diagnostics button on the lock screen, both read from logcat
+(`build/p3a/phone/P-bench.txt`, `P-benchmark.raw`). The benchmark build is about fifteen
+times faster than the debug build on this phone, steady to within one percent, and linear
+in memory and passes (about 3.2 ms per MiB-pass).
 
 Keystore HMAC-SHA256 key (`hmac_probe`, alias created and deleted within the action):
 
@@ -172,36 +169,49 @@ Keystore HMAC-SHA256 key (`hmac_probe`, alias created and deleted within the act
 |---|---|---|---|---|---|
 | Emulator, debug | 15 ms | not lock-bound (no screen lock) | not offered | SOFTWARE | 5 to 12 ms |
 | Emulator, benchmark | 7 ms | not lock-bound | not offered | SOFTWARE | 1 ms |
-| Xiaomi, debug and benchmark | not measured: phone not attached | | | | |
+| Xiaomi, debug | 37 ms | not lock-bound (no screen lock) | not offered | TRUSTED_ENVIRONMENT | 15 to 22 ms |
+| Xiaomi, benchmark | 32 ms | not lock-bound (no screen lock) | not offered | TRUSTED_ENVIRONMENT | 18 to 23 ms |
 
-The emulator Keystore is software-backed, as in Phases 1 and 2. On the Xiaomi the provider 2
-AES key reported `TRUSTED_ENVIRONMENT` and no StrongBox; the HMAC key is expected to report
-the same and that is to be confirmed by the run above.
+The emulator Keystore is software-backed, as in Phases 1 and 2. On the Xiaomi the HMAC key
+reports `TRUSTED_ENVIRONMENT` like the provider 2 AES key, and no StrongBox (measured
+2026-10-14, debug build, `build/p3a/phone/P-bench.txt`). The phone debug figures scale
+linearly with memory and passes (about 48 ms per MiB-pass) and are steady to within one
+percent across runs; the debug variant links the unoptimised libsodium, so the benchmark row
+is the one the Section 3.4 rule uses.
 
 ### 3.4 Default parameters (CP-2)
 
 Rule: among the pairs in the Section 3.2 box, take the one with the largest `memlimit`
 whose benchmark-build time on the Xiaomi lies within 0.5 to 1.0 s, and among equal memory
 the larger `opslimit`; memory is preferred because Argon2id's cost against parallel
-hardware comes from memory. The phone figures are not in yet, so the proposal is
-provisional:
+hardware comes from memory. Applied to the measured row: at 256 MiB, ops 2 takes 0.83 to
+0.88 s (inside the window) and ops 3 takes 1.18 s (outside); at 128 MiB, ops 3 takes
+0.59 s. The rule therefore selects ops 2 / 256 MiB.
 
-| Parameter | Provisional default | Reason |
-|---|---|---|
-| `opslimit` | 3 | the MODERATE pass count |
-| `memlimit` | 64 MiB | one Argon2id allocation of this size is safe beside the capture pipeline's measured native peak of about 50 MB on the phone; 128 MiB or 256 MiB only if the phone shows them under 1.0 s and the app survives the allocation next to a bound camera |
+| Parameter | Provisional (Milestones C to E) | Final (CP-2, D-021) | Reason |
+|---|---|---|---|
+| `opslimit` | 3 | 2 | the only pass count inside the window at 256 MiB |
+| `memlimit` | 64 MiB | 256 MiB | the largest memory inside the window: 0.83 to 0.88 s per guess on the phone |
 
-Named `PV_PIN_OPSLIMIT_DEFAULT` and `PV_PIN_MEMLIMIT_DEFAULT` in `pv.h` and mirrored in
-Kotlin; the developer confirms the values at the checkpoint or after the phone run.
+Consequences of the proposal: one 256 MiB allocation per unlock, PIN change, or setup,
+always from the lock or vault screen, never with the camera bound; a device that cannot
+give it reports `PV_ERR_OUT_OF_MEMORY` instead of weakening the parameters; the debug
+build (unoptimised libsodium) takes about 12.5 s per stretch on this phone and 3.5 to 5 s
+on the emulator, which lengthens the T2 lock tests but changes no result. The fallback if
+the memory footprint is judged too large for the devices in scope is ops 3 / 128 MiB at
+0.59 s. Named `PV_PIN_OPSLIMIT_DEFAULT` and `PV_PIN_MEMLIMIT_DEFAULT` in `pv.h` and mirrored
+in Kotlin. Approved by the developer on 2026-10-14 with three conditions (allocation
+failure handling, explicit test parameters, the fallback recorded); D-021.
 
 The reader accepts the whole range of Section 3.2, so the default can change in a later
 stage without a format change; an envelope records the parameters it was written with.
 
 ### 3.5 Cost of guessing (for the threat model)
 
-With 6 digits and the target of 0.5 to 1.0 s per guess on this phone, exhausting the PIN
-space takes 6 to 12 days of single-threaded on-device work (about a week at 0.7 s), each
-extra digit ten times more. The exact figure follows the phone measurement. The
+With 6 digits and the proposed default (0.83 to 0.88 s per guess on this phone, benchmark
+build), exhausting the PIN space takes about 10 days of single-threaded on-device work,
+each extra digit ten times more; under the provisional ops 3 / 64 MiB it was 0.29 s per
+guess, about 3.3 days. The
 app-enforced delays (Section 8) stand in front of that for anyone without root; an attacker
 with root can reset them and is limited by the KDF cost alone. No hardware attempt counter
 exists for app Keystore keys.
@@ -732,6 +742,26 @@ developer agrees.
   of CP-6 is gone again.
 - Section 13: a Keystore refusal (device locked, lock-bound key) leaves the attempt
   counted, since the record precedes the stretch.
+- Section 5, step 3 (found on the Xiaomi during T3): the lock closed the vault handle while
+  `verify_all` on the vault screen was still decrypting a 100 MB object, so the decrypt
+  finished on a freed handle and the remaining objects failed with `INVALID_ARGUMENT`. The
+  drain only covered the capture queue. The Kotlin `Vault` now holds a read-write guard:
+  every core call takes the read side, `close()` takes the write side and waits for the
+  call in flight, and every later call fails with "vault closed". A lock therefore waits
+  for a running sample operation (bounded by that operation, about 4 s for a 100 MB verify
+  in the benchmark build) while the UI is already hidden. `verify_all` stops when the vault
+  is closed.
+- Section 8 (CP-2 condition): `PV_ERR_OUT_OF_MEMORY` from the stretch gives
+  `Result.NoMemory`, the lock screen says "Not enough memory, try again", and the attempt
+  record written before the stretch is restored from a snapshot taken just before it
+  (`AttemptPolicy.current`, `restore`). The debug-only JNI hook
+  `nativeSetPinStretchFailure` forces that code; `LockTest.allocationFailureIsNotAGuess`
+  covers unlock and PIN change.
+- Section 16 (CP-2 condition): `LockController.testHooks.kdfOverride` lets the lock tests
+  make their vaults at ops 2 / 64 MiB; `LockTest.defaultsAreRecorded` makes one vault with
+  the defaults and checks the envelope says ops 2 / 256 MiB.
+- Section 5: `ScriptActivity` accepts `change_pin=<current>:<new>` after the unlock so the
+  phone vault can be rewrapped by script after the defaults changed.
 - Section 16: the "kill during an unlock" check runs as an instrumented test through the
   `beforeStretch` hook (the attempt is on disk when the hook fires) and as a host step
   (`am kill` during a 4 s delayed unlock, counter checked by the following attempts).

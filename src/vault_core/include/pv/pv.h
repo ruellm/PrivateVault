@@ -242,10 +242,10 @@ void pv_sink_item_abort(pv_sink* s);
 #define PV_PIN_OPSLIMIT_MAX 3u
 #define PV_PIN_MEMLIMIT_MIN (64u * 1024u * 1024u)
 #define PV_PIN_MEMLIMIT_MAX (256u * 1024u * 1024u)
-// Parameters a new envelope is written with. Provisional until the phone
-// measurement (design Section 3.4).
-#define PV_PIN_OPSLIMIT_DEFAULT 3u
-#define PV_PIN_MEMLIMIT_DEFAULT (64u * 1024u * 1024u)
+// Parameters a new envelope is written with: 0.83 to 0.88 s per guess on the
+// Xiaomi 2201116SG in the optimised build (design Section 3.4, CP-2).
+#define PV_PIN_OPSLIMIT_DEFAULT 2u
+#define PV_PIN_MEMLIMIT_DEFAULT (256u * 1024u * 1024u)
 
 int pv_pin_stretch(const uint8_t* pin, size_t pin_len, const uint8_t* salt, size_t salt_len,
                    uint64_t opslimit, uint64_t memlimit, uint8_t* out, size_t out_len);

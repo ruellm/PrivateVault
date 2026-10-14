@@ -40,6 +40,25 @@ class AttemptPolicy(context: Context, private val clock: Clock = SystemClocks(co
 
     val failures: Int get() = prefs.getInt(K_FAILURES, 0)
 
+    // The stored record, so a caller can put it back after an attempt that
+    // turned out not to be a guess (the stretch could not get its memory).
+    class Record(val failures: Int, val delayMs: Long, val failElapsedMs: Long, val failWallMs: Long, val bootCount: Long)
+
+    fun current(): Record = Record(
+        failures, prefs.getLong(K_DELAY, 0L), prefs.getLong(K_FAIL_ELAPSED, 0L),
+        prefs.getLong(K_FAIL_WALL, 0L), prefs.getLong(K_BOOT, -1L)
+    )
+
+    fun restore(r: Record) {
+        prefs.edit()
+            .putInt(K_FAILURES, r.failures)
+            .putLong(K_DELAY, r.delayMs)
+            .putLong(K_FAIL_ELAPSED, r.failElapsedMs)
+            .putLong(K_FAIL_WALL, r.failWallMs)
+            .putLong(K_BOOT, r.bootCount)
+            .commit()
+    }
+
     // Milliseconds still to wait before the next attempt may start.
     fun remainingMs(): Long {
         val delay = prefs.getLong(K_DELAY, 0L)
