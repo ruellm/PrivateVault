@@ -41,9 +41,10 @@ class ScriptActivity : Activity() {
                 when {
                     // Unlocked: everything but a PIN change and the viewer
                     // probes goes to the vault screen.
-                    entered && !n.startsWith("change_pin=") && n != "orient_probe" && n != "alloc_probe" -> break
+                    entered && !n.startsWith("change_pin=") && n != "orient_probe" && n != "alloc_probe" && n != "exif_tags" -> break
                     n == "alloc_probe" -> ViewerProbes.allocProbe { Log.i(TAG, it) }
                     n == "orient_probe" && entered -> ViewerProbes.orientProbe(PvApp.of(this).vaultSession) { Log.i(TAG, it) }
+                    n == "exif_tags" && entered -> ViewerProbes.exifTags(PvApp.of(this).vaultSession, { Log.i(TAG, it) })
                     n.startsWith("set_idle_ms=") -> {
                         lock.idleTimeoutMs = n.substringAfter('=').toLong()
                         Log.i(TAG, "script: idle timeout ${lock.idleTimeoutMs} ms")

@@ -213,7 +213,7 @@ claim. Design: `docs/PHASE3B_DESIGN.md`.
 |---|---|---|
 | T25 | Screenshot, screen recording, or recents card of the gallery or viewer | `FLAG_SECURE` on both activities; the recents card is checked on the Xiaomi in T3. No `Dialog`, popup, or toast carries content (P3-14). |
 | T26 | Plaintext left in memory after viewing | The guarded block is wiped right after the decode on every path (success, failure, cancel); the bitmap is erased and recycled on stop, lock, eviction, and replacement; a load whose result arrives after a stop is erased at once. Decoder scratch, render node, GPU texture, and compositor buffers are not erased by the app. |
-| T27 | Plaintext in zram | Decrypted buffers are guarded and wiped but not locked: `RLIMIT_MEMLOCK` is 64 KiB on both devices and `sodium_malloc` ignores the refusal, so their pages can reach zram (compressed swap in RAM) while the buffer exists. Bitmaps are ordinary heap memory with the same exposure. |
+| T27 | Plaintext in zram | Decrypted buffers are guarded and wiped; whether they are locked depends on the device. Measured in the app process (`alloc_probe`): on the Xiaomi 2201116SG the limit is 64 MiB and `mlock` succeeds up to 64 MiB, so the viewer buffer (at most 32 MiB) is locked and cannot reach zram; on the emulator the limit is 64 KiB, the lock is refused, `sodium_malloc` ignores the refusal, and the pages can reach zram (compressed swap in RAM) while the buffer exists. The limit is a per-device property the app cannot raise. Bitmaps are ordinary heap memory and can reach zram on any device. |
 | T28 | A damaged, truncated, or wrong-key object shows a partial image | The buffer is filled by the Phase 1 decrypt and used only after the FINAL chunk verified; on any failure the core wipes the whole buffer before returning. A damaged object is a labelled tile. |
 | T29 | An oversized object exhausts memory | Objects above 32 MiB of plaintext are never decrypted for display; the size comes from the header and file length without decrypting. |
 | T30 | Lock while a photo is being decrypted or decoded | The decrypt stops at the next chunk with `PV_ERR_CANCELLED` and the buffer is wiped; a decode in flight ends within its bound and its bitmap is erased; the activities finished on `LOCKED_UI`. |
@@ -222,8 +222,13 @@ claim. Design: `docs/PHASE3B_DESIGN.md`.
 
 ### 8.3 Residual risks
 
-- Decoder and GPU copies (8.1, T26) and the unlocked guarded block (T27) are outside the
-  app; the app does not claim erasure of them.
+- Decoder and GPU copies (8.1, T26) and, on devices with a small memory lock limit, the
+  unlocked guarded block (T27) are outside the app; the app does not claim erasure of them.
+- EXIF inside the JPEG payload: the Xiaomi writes make, model, and an embedded thumbnail
+  into the capture; the emulator writes make, model, and the orientation tag. All of it is
+  inside the encrypted object and is shown nowhere by the viewer, but it travels with the
+  payload if a photo is ever shared (Phase 5 item in `docs/ROADMAP.md`). Which tags are
+  present is recorded in `docs/PHASE3B_TEST_REPORT.md`.
 - The heap finding of the capture burst (brief 4.7): on the emulator (Stage 3B, Milestone
   D) the Java heap peak rises by about 1 MB per 571 KB capture until a collection and
   drops back after it, the same shape as on the Xiaomi in Phase 2; the allocating class and

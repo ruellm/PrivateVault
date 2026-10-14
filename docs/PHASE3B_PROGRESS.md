@@ -8,9 +8,9 @@ Brief: `PHASE3B_BRIEF.md` (repository root, supplied by the developer).
 Milestone A done on Windows and the emulator; the two phone steps of Milestone A wait for
 the developer (Section "Phone steps waiting for the developer"). Milestone B design approved at the
 checkpoint with four changes (Section "Checkpoint"). Milestone C done (T1 17/17 Debug and
-Release). Milestone D done (T2 63 tests green, host-driven steps on the emulator complete). Milestone E:
-everything that runs without the phone is done (report, docs); the phone steps wait for the
-developer (Section "Phone steps waiting for the developer"). Code changes so far are the Milestone A measurement hooks and the trial removal
+Release). Milestone D done (T2 63 tests green, host-driven steps on the emulator complete). Milestone E done
+except the heap investigation, which the developer deferred (Section "T3 session log"); the
+phone holds debug build 0.4.0 and its vault of 58 objects. Code changes so far are the Milestone A measurement hooks and the trial removal
 of `camera-video` (kept, as P3-10 is final); all uncommitted. The emulator holds the trial
 debug build with a throwaway-PIN vault of 8 photos and 5 video prototype objects; the phone
 is untouched (debug build 0.3.0, provider 3 vault of 55 objects, locked, screen dozing).
@@ -129,7 +129,7 @@ is untouched (debug build 0.3.0, provider 3 vault of 55 objects, locked, screen 
    reports 7.6 GB `MemTotal` and `RLIMIT_MEMLOCK` 65 536 bytes (`ulimit -l` 64 KiB on both
    devices).
 
-## Phone steps waiting for the developer (Milestone E, T3)
+## Phone steps (Milestone E, T3; run on 2026-10-14 except `heap`)
 
 The phone (`9c4424ba81c6`) is connected but its screen is dozing, MIUI refuses
 `input keyevent` from the shell, every install needs the on-screen tap, and the vault PIN
@@ -260,6 +260,28 @@ ctest --preset windows-x64-tests-release          # 17/17 passed, 28 s
 ```
 
 No compiler warnings at `/W4` in either configuration (`build/p3b/t1c2-*.log`).
+
+## T3 session log (2026-10-14, the phone)
+
+The developer committed the stage (`9675bb8`), woke the phone, tapped the installs, gave
+the throwaway PIN in chat (not recorded here), and did the by-hand steps while logcat
+streamed. Order: `install-debug`; `alloc` (app `RLIMIT_MEMLOCK` 64 MiB, `mlock` succeeds up to
+64 MiB: the Milestone A figure of 64 KiB was the adb shell user's limit); `orient` (46
+photos, rotation 0 with turned pixels, Orientation tag undefined, decoders agree); `view`
+(46 photos, 2 large, 7 unknown, buffers freed 92, bitmaps erased 92, `leak_scan` 0, gallery
+of 55 tiles, PSS 117.7 MB); `exif_tags` (a new debug probe, rebuilt and reinstalled with a
+second tap: tag names only, no GPS); `capture` (`PreviewView` binds without `camera-video`,
+two captures, 57 of 57 verify, `leak_scan` 0); by hand: gallery and viewer upright in
+portrait and landscape, zoom and double tap, recents card blank with the viewer and with
+the gallery in front, Home, screen off, and the MIUI camera case all end on the lock screen
+(the screen-off case killed the process as in 3A), PSS 132.7 MB with a 2448x3264 photo
+shown; `install-benchmark` (third tap): keypad unlock 970 ms at ops 2 / 256 MiB, one capture
+(encrypt 44 ms, 816 ms to object), viewer at PSS 103.8 MB; `install-debug` again. Heap step
+skipped at the developer's request. Results in `docs/PHASE3B_TEST_REPORT.md` (Section T3);
+logs under `build/p3b/phone/` (0 PIN strings, 0 hex runs over 32 characters, 0 runtime
+errors). Developer amendments applied: `docs/ROADMAP.md` Phase 5 gains "strip EXIF (or
+rewrite a minimal header) before sharing"; `docs/THREAT_MODEL.md` T27 states the memory lock
+per device and the EXIF contents.
 
 ## Milestone E log (2026-10-14, without the phone)
 

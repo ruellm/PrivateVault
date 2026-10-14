@@ -11,7 +11,7 @@ Condensed from `PROJECT_HANDOFF.md` Section 3. Phase 2 is the active phase.
 | 3C to 3E | Video groundwork, playback, capture | Not started |
 | Video | Full video capture: viewfinder mirror, native segment buffering, index and recovery rules, audio; recommended as its own phase or the second half of Phase 3 (`docs/VIDEO_CAPTURE_FEASIBILITY.md` Section 6) | Not started |
 | 4 | Temporal interference experiment against external cameras; measured, not promised | Not started |
-| 5 | Permission-based sharing between devices, streaming from the source device, revocation, local access log | Not started |
+| 5 | Permission-based sharing between devices, streaming from the source device, revocation, local access log; strip EXIF (or rewrite a minimal header) before sharing, since captures carry make, model, and an embedded thumbnail inside the payload (Stage 3B finding) | Not started |
 | 6 | Security review, hardening, backup and migration design, iOS port, beta | Not started |
 
 Seams left in Phase 1 for later phases:

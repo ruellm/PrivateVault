@@ -27,6 +27,65 @@ object ViewerProbes {
         }
     }
 
+    // Tag names the platform class knows, checked for presence only. GPS tags first.
+    private val tagNames = listOf(
+        ExifInterface.TAG_GPS_LATITUDE, ExifInterface.TAG_GPS_LATITUDE_REF, ExifInterface.TAG_GPS_LONGITUDE,
+        ExifInterface.TAG_GPS_LONGITUDE_REF, ExifInterface.TAG_GPS_ALTITUDE, ExifInterface.TAG_GPS_ALTITUDE_REF,
+        ExifInterface.TAG_GPS_TIMESTAMP, ExifInterface.TAG_GPS_DATESTAMP, ExifInterface.TAG_GPS_PROCESSING_METHOD,
+        ExifInterface.TAG_GPS_SPEED, ExifInterface.TAG_GPS_IMG_DIRECTION, ExifInterface.TAG_GPS_DEST_LATITUDE,
+        ExifInterface.TAG_GPS_DEST_LONGITUDE, ExifInterface.TAG_GPS_AREA_INFORMATION, ExifInterface.TAG_GPS_VERSION_ID,
+        ExifInterface.TAG_MAKE, ExifInterface.TAG_MODEL, ExifInterface.TAG_SOFTWARE, ExifInterface.TAG_ORIENTATION,
+        ExifInterface.TAG_DATETIME, ExifInterface.TAG_DATETIME_ORIGINAL, ExifInterface.TAG_DATETIME_DIGITIZED,
+        ExifInterface.TAG_SUBSEC_TIME, ExifInterface.TAG_SUBSEC_TIME_ORIGINAL, ExifInterface.TAG_SUBSEC_TIME_DIGITIZED,
+        ExifInterface.TAG_OFFSET_TIME, ExifInterface.TAG_OFFSET_TIME_ORIGINAL, ExifInterface.TAG_IMAGE_WIDTH,
+        ExifInterface.TAG_IMAGE_LENGTH, ExifInterface.TAG_PIXEL_X_DIMENSION, ExifInterface.TAG_PIXEL_Y_DIMENSION,
+        ExifInterface.TAG_X_RESOLUTION, ExifInterface.TAG_Y_RESOLUTION, ExifInterface.TAG_RESOLUTION_UNIT,
+        ExifInterface.TAG_Y_CB_CR_POSITIONING, ExifInterface.TAG_EXIF_VERSION, ExifInterface.TAG_FLASHPIX_VERSION,
+        ExifInterface.TAG_COLOR_SPACE, ExifInterface.TAG_COMPONENTS_CONFIGURATION, ExifInterface.TAG_EXPOSURE_TIME,
+        ExifInterface.TAG_F_NUMBER, ExifInterface.TAG_EXPOSURE_PROGRAM, ExifInterface.TAG_ISO_SPEED_RATINGS,
+        ExifInterface.TAG_SHUTTER_SPEED_VALUE, ExifInterface.TAG_APERTURE_VALUE, ExifInterface.TAG_BRIGHTNESS_VALUE,
+        ExifInterface.TAG_EXPOSURE_BIAS_VALUE, ExifInterface.TAG_MAX_APERTURE_VALUE, ExifInterface.TAG_METERING_MODE,
+        ExifInterface.TAG_LIGHT_SOURCE, ExifInterface.TAG_FLASH, ExifInterface.TAG_FOCAL_LENGTH,
+        ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM, ExifInterface.TAG_SUBJECT_DISTANCE, ExifInterface.TAG_SCENE_TYPE,
+        ExifInterface.TAG_SENSING_METHOD, ExifInterface.TAG_EXPOSURE_MODE, ExifInterface.TAG_WHITE_BALANCE,
+        ExifInterface.TAG_DIGITAL_ZOOM_RATIO, ExifInterface.TAG_SCENE_CAPTURE_TYPE, ExifInterface.TAG_CONTRAST,
+        ExifInterface.TAG_SATURATION, ExifInterface.TAG_SHARPNESS, ExifInterface.TAG_CUSTOM_RENDERED,
+        ExifInterface.TAG_INTEROPERABILITY_INDEX, ExifInterface.TAG_MAKER_NOTE, ExifInterface.TAG_USER_COMMENT,
+        ExifInterface.TAG_IMAGE_UNIQUE_ID, ExifInterface.TAG_IMAGE_DESCRIPTION, ExifInterface.TAG_ARTIST,
+        ExifInterface.TAG_COPYRIGHT, ExifInterface.TAG_THUMBNAIL_IMAGE_WIDTH, ExifInterface.TAG_THUMBNAIL_IMAGE_LENGTH,
+        ExifInterface.TAG_JPEG_INTERCHANGE_FORMAT, ExifInterface.TAG_JPEG_INTERCHANGE_FORMAT_LENGTH,
+        ExifInterface.TAG_COMPRESSION, ExifInterface.TAG_BITS_PER_SAMPLE
+    )
+
+    // Which EXIF tags the first few JPEG objects carry: names only, never a value.
+    // The GPS presence check uses the platform latLong reader as a second opinion.
+    fun exifTags(vaults: VaultSession, say: (String) -> Unit, limit: Int = 3) {
+        val v = vaults.vault ?: throw IllegalStateException("vault not open")
+        var seen = 0
+        for (e in v.listObjects()) {
+            if (seen >= limit) break
+            val load = v.viewerLoad(e.id, PhotoLoader.SIZE_CAP)
+            if (load.status != NativeBridge.OK || load.item?.mediaType != NativeBridge.MEDIA_JPEG) {
+                load.close()
+                continue
+            }
+            load.use { l ->
+                val payload = l.payload ?: return@use
+                val exif = ExifInterface(ByteBufferInputStream(payload.duplicate()))
+                val present = tagNames.filter { exif.getAttribute(it) != null }
+                val gps = present.filter { it.startsWith("GPS") }
+                val latLong = FloatArray(2)
+                val hasLatLong = exif.getLatLong(latLong)
+                latLong.fill(0f)
+                say("exif_tags ${e.hex}: ${present.size} of ${tagNames.size} known tags present, gps_tags=${gps.size} latLong=${if (hasLatLong) "PRESENT" else "none"} thumbnail=${exif.hasThumbnail()}")
+                say("exif_tags ${e.hex}: tags ${present.joinToString(" ")}")
+                if (gps.isNotEmpty()) say("exif_tags ${e.hex}: GPS tags ${gps.joinToString(" ")}")
+            }
+            seen++
+        }
+        say("exif_tags: $seen jpeg objects inspected")
+    }
+
     fun orientProbe(vaults: VaultSession, say: (String) -> Unit) {
         val v = vaults.vault ?: throw IllegalStateException("vault not open")
         var photos = 0
