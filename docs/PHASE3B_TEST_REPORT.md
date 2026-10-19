@@ -210,7 +210,9 @@ benchmark build 0.4.0, the same vault: **970 ms** through the keypad (`lock: unl
 
 ## Heap investigation (P3-12)
 
-Not done: skipped on the phone at the developer's request for now. The procedure is built
+Deferred to Stage 3E (developer decision, 2026-10-19): the growth is a CameraX-internal copy
+of an already-encrypted capture, freed by the next collection, and Stage 3E reworks the
+capture path. Not measured on the phone in this stage. The procedure is built
 and dry-run on the emulator (the `wait=<ms>` and `gc` actions, `am dumpheap` around them,
 dumps to `D:\pv-heap`; `bash build/p3b/phone-p3b.sh heap <pin>` runs it on the phone); the
 emulator shows the same shape as the phone in Phase 2 (about one capture of Java heap per
@@ -240,7 +242,7 @@ its EXIF. The threat model records the open position.
 
 ## Known limits and unresolved risks
 
-- The heap investigation has not run (above). Delete was not exercised by hand on the
+- The heap investigation moved to Stage 3E (above). Delete was not exercised by hand on the
   phone (emulator only, both builds).
 - Guarded buffers are locked on the Xiaomi (64 MiB limit) and not on the emulator (64 KiB
   limit); where the lock is refused their pages can reach zram while they exist. Decoder
@@ -269,7 +271,7 @@ its EXIF. The threat model records the open position.
 | 6 | `leak_scan` clean after viewer sessions on emulator and Xiaomi | Pass on both (Xiaomi: 0 findings after `view_all` over 55 objects and after the captures, 60 and 62 files scanned) |
 | 7 | Delete one photo works; interrupted delete leaves a consistent vault | Pass (T1 partial and object order, `NOT_FOUND`; T2 delete through the confirmation on debug and benchmark); not exercised by hand on the phone |
 | 8 | `camera-video` absent from every variant; release and benchmark contain no media3; debug on one media3 version; manifests unchanged; APK sizes recorded; capture still works on both devices | Pass (class counts, trees, manifests, sizes; captures in debug and benchmark on the emulator and on the Xiaomi) |
-| 9 | Heap investigation result recorded with evidence | **Not done** (skipped on the phone at the developer's request for now); the emulator dry run and the procedure are recorded |
+| 9 | Heap investigation result recorded with evidence | **Deferred to Stage 3E** (developer decision, 2026-10-19). Reason: the growth is a CameraX-internal copy of a capture that is already encrypted by the time it is held, and the garbage collector frees it; Stage 3E reworks the capture path, so the measurement belongs there. The emulator dry run and the procedure are recorded below |
 | 10 | C ABI changes additive; all golden vectors decrypt on both platforms | Pass (Windows: `test_golden` with the buffer path; emulator: `GoldenVectorTest` unchanged and passing) |
 | 11 | Threat model updated: decoder and GPU memory, size cap, delete is not erasure, heap finding | Pass (Section 8; memory lock per device, EXIF contents, the heap row states the open position) |
 | 12 | Report separates demonstrated facts from assumptions | Pass (this document) |
@@ -337,7 +339,7 @@ recents, benchmark-build keypad run and capture; leak scans at zero.
 
 Docs: design (approved with four changes), decisions D-022 to D-027, threat
 model Section 8, dependencies, roadmap, progress, test report with the
-Xiaomi T3 results. The heap investigation is deferred.
+Xiaomi T3 results. The heap investigation is deferred to Stage 3E.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 ```

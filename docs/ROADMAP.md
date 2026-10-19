@@ -7,8 +7,10 @@ Condensed from `PROJECT_HANDOFF.md` Section 3. Phase 2 is the active phase.
 | 1 | Encrypted storage core (C++20, libsodium), desktop CLI, Android proof of concept, tests, documentation | Complete |
 | 2 | In-app photo capture written straight into encrypted objects; plaintext exposure audit; video feasibility prototype | Active |
 | 3A | PIN lock, PIN-derived vault key (envelope provider 3), migration, lock rules, attempt delays, erase (`docs/PHASE3A_DESIGN.md`) | Complete |
-| 3B | Photo gallery and viewer, delete one photo, camera-video removed from every variant, heap investigation (`docs/PHASE3B_DESIGN.md`) | Active: Milestone B design at the checkpoint |
-| 3C to 3E | Video groundwork, playback, capture | Not started |
+| 3B | Photo gallery and viewer, delete one photo, camera-video removed from every variant (`docs/PHASE3B_DESIGN.md`) | Complete; the heap investigation moved to 3E |
+| 3C | Video groundwork: key-frame investigation, index format, seeking, playback probe | Not started |
+| 3D | Video playback in the viewer | Not started |
+| 3E | Video capture as a feature; the capture-burst heap investigation from 3B (brief 4.7, P3-12): a CameraX-internal copy of an already-encrypted capture, freed by the garbage collector, measured here because 3E reworks the capture path (procedure in `docs/PHASE3B_DESIGN.md` Section 10, `build/p3b/phone-p3b.sh heap`) | Not started |
 | Video | Full video capture: viewfinder mirror, native segment buffering, index and recovery rules, audio; recommended as its own phase or the second half of Phase 3 (`docs/VIDEO_CAPTURE_FEASIBILITY.md` Section 6) | Not started |
 | 4 | Temporal interference experiment against external cameras; measured, not promised | Not started |
 | 5 | Permission-based sharing between devices, streaming from the source device, revocation, local access log; strip EXIF (or rewrite a minimal header) before sharing, since captures carry make, model, and an embedded thumbnail inside the payload (Stage 3B finding) | Not started |
