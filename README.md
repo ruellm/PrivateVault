@@ -61,9 +61,10 @@ docs/                design, threat model, dependencies, decisions, reports
   Windows, about 7 minutes per Android ABI) and stores it in the binary cache.
 
 - For Android: Android SDK with platforms 35 and 36, build-tools 35.0.0, NDK r29
-  (`29.0.14206865`), SDK CMake 4.1.2, and a JDK 17 or later. Set `ANDROID_HOME`,
+  (`29.0.14206865`), SDK CMake 4.1.2, and a JDK 17 to 23. Set `ANDROID_HOME`,
   `ANDROID_NDK_HOME`, and `JAVA_HOME`. Android Studio Meerkat (2024.3.1) or later opens the
-  project (AGP 8.9).
+  project (AGP 8.9). Gradle needs JDK 17 to 23; the project uses `D:\tools\jdk-21` (Android
+  Studio's bundled JDK 25 is not supported by Gradle 8.11.1).
 
 ## Build and test on Windows (T1)
 

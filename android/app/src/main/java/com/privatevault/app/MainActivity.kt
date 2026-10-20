@@ -154,6 +154,8 @@ class MainActivity : Activity(), LockController.Listener {
                 name == "gallery" -> { { main.post { startActivity(Intent(this, GalleryActivity::class.java)) } } }
                 name.startsWith("delete_object=") -> { { deleteObject(name.substringAfter('=')) } }
                 name == "gc" -> { { forceGc() } }
+                // Phase 3C: the playback probe, debug variant only.
+                name.startsWith("video_play=") -> { { openPlayback(name.substringAfter('=')) } }
                 else -> { { say("unknown action $name") } }
             }
             run(name, action)
@@ -242,6 +244,15 @@ class MainActivity : Activity(), LockController.Listener {
 
     private fun forceGc() {
         say(HeapActions.gcLine())
+    }
+
+    private fun openPlayback(arg: String) {
+        val launcher = VideoProbes.playback
+        if (launcher == null) {
+            say("video_play: not available in this build")
+            return
+        }
+        main.post { launcher(this, arg) }
     }
 
     // Encrypts a small object, damages one ciphertext byte, expects AUTH_FAILED,

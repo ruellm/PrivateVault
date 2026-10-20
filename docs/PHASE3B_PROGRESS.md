@@ -5,15 +5,10 @@ Brief: `PHASE3B_BRIEF.md` (repository root, supplied by the developer).
 
 ## Current state (2026-10-14)
 
-Milestone A done on Windows and the emulator; the two phone steps of Milestone A wait for
-the developer (Section "Phone steps waiting for the developer"). Milestone B design approved at the
-checkpoint with four changes (Section "Checkpoint"). Milestone C done (T1 17/17 Debug and
-Release). Milestone D done (T2 63 tests green, host-driven steps on the emulator complete). Milestone E done
-except the heap investigation, which the developer deferred (Section "T3 session log"); the
-phone holds debug build 0.4.0 and its vault of 58 objects. Code changes so far are the Milestone A measurement hooks and the trial removal
-of `camera-video` (kept, as P3-10 is final); all uncommitted. The emulator holds the trial
-debug build with a throwaway-PIN vault of 8 photos and 5 video prototype objects; the phone
-is untouched (debug build 0.3.0, provider 3 vault of 55 objects, locked, screen dozing).
+Stage 3B complete and committed (`9675bb8`, `93cbc41`, `d9a1445`). Milestones A to D on
+Windows and the emulator, Milestone E on the Xiaomi with the developer's taps (Section
+"T3 session log"); the heap investigation moved to Stage 3E. The phone holds debug build
+0.4.0 and its vault of 58 objects. The emulator was stopped at the end of each session.
 
 ## Milestone A log (2026-10-14)
 

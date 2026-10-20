@@ -301,6 +301,100 @@ int decrypt_item(JNIEnv* env, pv_vault* v, const uint8_t* vmk, pv_source* file_s
     return rc;
 }
 
+// Phase 3C: video index (docs/PHASE3C_DESIGN.md Section 4.4). The header
+// crosses as a LongArray of 13: [version, header_len, video_codec, rotation,
+// width, height, frame_rate_millihz, segment_count, total_duration_us,
+// created_unix_ms, audio_codec, audio_channels, audio_sample_rate]. Segment
+// records cross as a flat ByteArray of IDs (16 bytes each) and a LongArray of
+// 5 per segment: [start_us, duration_us, byte_len, key_count, flags]. Key
+// offsets cross as one IntArray in segment order.
+constexpr jsize kIndexHeaderFields = 13;
+constexpr jsize kSegmentFields = 5;
+
+bool header_from_array(JNIEnv* env, jlongArray arr, pv_video_index_header* h) {
+    if (!arr || env->GetArrayLength(arr) < kIndexHeaderFields) {
+        return false;
+    }
+    jlong f[kIndexHeaderFields];
+    env->GetLongArrayRegion(arr, 0, kIndexHeaderFields, f);
+    for (jlong v : f) {
+        if (v < 0) {
+            return false;
+        }
+    }
+    *h = pv_video_index_header{};
+    h->version = static_cast<uint16_t>(f[0]);
+    h->header_len = static_cast<uint16_t>(f[1]);
+    h->video_codec = static_cast<uint16_t>(f[2]);
+    h->rotation_degrees = static_cast<uint16_t>(f[3]);
+    h->width = static_cast<uint32_t>(f[4]);
+    h->height = static_cast<uint32_t>(f[5]);
+    h->frame_rate_millihz = static_cast<uint32_t>(f[6]);
+    h->segment_count = static_cast<uint32_t>(f[7]);
+    h->total_duration_us = static_cast<uint64_t>(f[8]);
+    h->created_unix_ms = static_cast<uint64_t>(f[9]);
+    h->audio_codec = static_cast<uint16_t>(f[10]);
+    h->audio_channels = static_cast<uint16_t>(f[11]);
+    h->audio_sample_rate = static_cast<uint32_t>(f[12]);
+    return true;
+}
+
+void header_to_array(JNIEnv* env, jlongArray arr, const pv_video_index_header& h) {
+    jlong f[kIndexHeaderFields] = {
+        h.version, h.header_len, h.video_codec, h.rotation_degrees, h.width, h.height,
+        h.frame_rate_millihz, h.segment_count, static_cast<jlong>(h.total_duration_us),
+        static_cast<jlong>(h.created_unix_ms), h.audio_codec, h.audio_channels, h.audio_sample_rate};
+    env->SetLongArrayRegion(arr, 0, kIndexHeaderFields, f);
+}
+
+// Segment records from the flat arrays. ids may be null (locate needs none).
+bool segments_from_arrays(JNIEnv* env, jbyteArray ids, jlongArray fields, size_t count,
+                          std::vector<pv_video_segment>& out) {
+    if (!fields || count > static_cast<size_t>(env->GetArrayLength(fields)) / kSegmentFields) {
+        return false;
+    }
+    if (ids && static_cast<size_t>(env->GetArrayLength(ids)) < count * PV_OBJECT_ID_BYTES) {
+        return false;
+    }
+    std::vector<jlong> f(count * kSegmentFields);
+    if (!f.empty()) {
+        env->GetLongArrayRegion(fields, 0, static_cast<jsize>(f.size()), f.data());
+    }
+    out.assign(count, pv_video_segment{});
+    for (size_t i = 0; i < count; ++i) {
+        const jlong* s = &f[i * kSegmentFields];
+        if (s[0] < 0 || s[1] < 0 || s[2] < 0 || s[3] < 0 || s[4] < 0) {
+            return false;
+        }
+        out[i].start_us = static_cast<uint64_t>(s[0]);
+        out[i].duration_us = static_cast<uint64_t>(s[1]);
+        out[i].byte_len = static_cast<uint64_t>(s[2]);
+        out[i].key_count = static_cast<uint32_t>(s[3]);
+        out[i].flags = static_cast<uint32_t>(s[4]);
+        if (ids) {
+            env->GetByteArrayRegion(ids, static_cast<jsize>(i * PV_OBJECT_ID_BYTES), PV_OBJECT_ID_BYTES,
+                                    reinterpret_cast<jbyte*>(out[i].object_id));
+        }
+    }
+    return true;
+}
+
+bool keys_from_array(JNIEnv* env, jintArray keys, std::vector<uint32_t>& out) {
+    if (!keys) {
+        return false;
+    }
+    jsize n = env->GetArrayLength(keys);
+    std::vector<jint> k(static_cast<size_t>(n));
+    if (n > 0) {
+        env->GetIntArrayRegion(keys, 0, n, k.data());
+    }
+    out.resize(k.size());
+    for (size_t i = 0; i < k.size(); ++i) {
+        out[i] = static_cast<uint32_t>(k[i]);
+    }
+    return true;
+}
+
 }  // namespace
 
 extern "C" {
@@ -886,10 +980,11 @@ Java_com_privatevault_app_NativeBridge_nativeObjectPlaintextSize(JNIEnv* env, jc
 // Allocates guarded memory for the whole plaintext, decrypts into it, and
 // decodes the item header. Returns the decrypt status. On PV_OK info_out =
 // [item_status, media_type, rotation, width, height, created_unix_ms,
-// payload_len, header_len, plaintext_len] and, for a JPEG item only,
-// buffer_out[0] is a direct ByteBuffer over the plaintext that the caller
-// gives back to nativeViewerFree. Every other outcome leaves nothing
-// allocated: the buffer of an unknown item is wiped here at once.
+// payload_len, header_len, plaintext_len] and, for an item of a known media
+// type (JPEG, video segment, video index), buffer_out[0] is a direct
+// ByteBuffer over the plaintext that the caller gives back to
+// nativeViewerFree. Every other outcome leaves nothing allocated: the buffer
+// of an unknown item is wiped here at once.
 JNIEXPORT jint JNICALL
 Java_com_privatevault_app_NativeBridge_nativeViewerLoad(JNIEnv* env, jclass, jlong handle,
                                                         jbyteArray id, jlong cap,
@@ -957,7 +1052,9 @@ Java_com_privatevault_app_NativeBridge_nativeViewerLoad(JNIEnv* env, jclass, jlo
         info[7] = h.header_len;
     }
     info[8] = static_cast<jlong>(len);
-    if (item_rc == PV_OK && h.media_type == PV_MEDIA_JPEG) {
+    bool known = h.media_type == PV_MEDIA_JPEG || h.media_type == PV_MEDIA_VIDEO_SEGMENT ||
+                 h.media_type == PV_MEDIA_VIDEO_INDEX;
+    if (item_rc == PV_OK && known) {
         jobject bb = env->NewDirectByteBuffer(buf, static_cast<jlong>(len));
         if (!bb) {
             pv_secure_free(buf, static_cast<size_t>(size));
@@ -992,6 +1089,158 @@ Java_com_privatevault_app_NativeBridge_nativeDeleteObject(JNIEnv* env, jclass, j
         return PV_ERR_INVALID_ARGUMENT;
     }
     return pv_vault_delete_object(handle_to_vault(handle), oid.data());
+}
+
+// Phase 3C video index entry points (array shapes above segments_from_arrays).
+
+// Encodes an index. Returns the bytes, or null with the status in status_out.
+JNIEXPORT jbyteArray JNICALL
+Java_com_privatevault_app_NativeBridge_nativeVideoIndexEncode(JNIEnv* env, jclass, jlongArray header,
+                                                              jbyteArray ids, jlongArray seg_fields,
+                                                              jintArray keys, jintArray status_out) {
+    jint rc = PV_ERR_INVALID_ARGUMENT;
+    jbyteArray result = nullptr;
+    pv_video_index_header h{};
+    std::vector<pv_video_segment> segs;
+    std::vector<uint32_t> k;
+    if (header_from_array(env, header, &h) && ids &&
+        segments_from_arrays(env, ids, seg_fields, h.segment_count, segs) && keys_from_array(env, keys, k)) {
+        size_t size = 0;
+        rc = pv_video_index_size(&h, segs.data(), &size);
+        if (rc == PV_OK) {
+            std::vector<uint8_t> out(size);
+            size_t len = 0;
+            rc = pv_video_index_encode(&h, segs.data(), k.data(), k.size(), out.data(), out.size(), &len);
+            if (rc == PV_OK) {
+                result = env->NewByteArray(static_cast<jsize>(len));
+                if (result) {
+                    put_bytes(env, result, out.data(), len);
+                } else {
+                    rc = PV_ERR_INTERNAL;
+                }
+            }
+        }
+    }
+    if (status_out && env->GetArrayLength(status_out) >= 1) {
+        env->SetIntArrayRegion(status_out, 0, 1, &rc);
+    }
+    return result;
+}
+
+// Header and counts of an index held in buf[offset, offset + length).
+// keys_total_out[0] gets the number of key offsets across all segments.
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeVideoIndexDecodeHeader(JNIEnv* env, jclass, jbyteArray buf,
+                                                                    jint offset, jint length,
+                                                                    jlongArray header_out,
+                                                                    jlongArray keys_total_out) {
+    if (!buf || offset < 0 || length < 0 || static_cast<jlong>(offset) + length > env->GetArrayLength(buf) ||
+        !header_out || env->GetArrayLength(header_out) < kIndexHeaderFields || !keys_total_out ||
+        env->GetArrayLength(keys_total_out) < 1) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    std::vector<uint8_t> b(static_cast<size_t>(length));
+    if (length > 0) {
+        env->GetByteArrayRegion(buf, offset, length, reinterpret_cast<jbyte*>(b.data()));
+    }
+    pv_video_index_header h{};
+    size_t keys_total = 0;
+    int rc = pv_video_index_decode_header(b.empty() ? reinterpret_cast<const uint8_t*>("") : b.data(),
+                                          b.size(), &h, &keys_total);
+    if (rc == PV_OK) {
+        header_to_array(env, header_out, h);
+        jlong kt = static_cast<jlong>(keys_total);
+        env->SetLongArrayRegion(keys_total_out, 0, 1, &kt);
+    }
+    return rc;
+}
+
+// Whole index: header, IDs, segment fields, and key offsets into arrays
+// sized from a previous decode_header. counts_out = [segments, keys].
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeVideoIndexDecode(JNIEnv* env, jclass, jbyteArray buf,
+                                                              jint offset, jint length,
+                                                              jlongArray header_out, jbyteArray ids_out,
+                                                              jlongArray seg_fields_out, jintArray keys_out,
+                                                              jlongArray counts_out) {
+    if (!buf || offset < 0 || length < 0 || static_cast<jlong>(offset) + length > env->GetArrayLength(buf) ||
+        !header_out || env->GetArrayLength(header_out) < kIndexHeaderFields || !ids_out || !seg_fields_out ||
+        !keys_out || !counts_out || env->GetArrayLength(counts_out) < 2) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    size_t segs_cap = static_cast<size_t>(env->GetArrayLength(ids_out)) / PV_OBJECT_ID_BYTES;
+    if (static_cast<size_t>(env->GetArrayLength(seg_fields_out)) / kSegmentFields < segs_cap) {
+        segs_cap = static_cast<size_t>(env->GetArrayLength(seg_fields_out)) / kSegmentFields;
+    }
+    size_t keys_cap = static_cast<size_t>(env->GetArrayLength(keys_out));
+    std::vector<uint8_t> b(static_cast<size_t>(length));
+    if (length > 0) {
+        env->GetByteArrayRegion(buf, offset, length, reinterpret_cast<jbyte*>(b.data()));
+    }
+    pv_video_index_header h{};
+    std::vector<pv_video_segment> segs(segs_cap);
+    std::vector<uint32_t> keys(keys_cap);
+    size_t keys_len = 0;
+    int rc = pv_video_index_decode(b.empty() ? reinterpret_cast<const uint8_t*>("") : b.data(), b.size(), &h,
+                                   segs.data(), segs.size(), keys.data(), keys.size(), &keys_len);
+    if (rc != PV_OK) {
+        return rc;
+    }
+    header_to_array(env, header_out, h);
+    std::vector<jlong> f(static_cast<size_t>(h.segment_count) * kSegmentFields);
+    for (size_t i = 0; i < h.segment_count; ++i) {
+        env->SetByteArrayRegion(ids_out, static_cast<jsize>(i * PV_OBJECT_ID_BYTES), PV_OBJECT_ID_BYTES,
+                                reinterpret_cast<const jbyte*>(segs[i].object_id));
+        jlong* s = &f[i * kSegmentFields];
+        s[0] = static_cast<jlong>(segs[i].start_us);
+        s[1] = static_cast<jlong>(segs[i].duration_us);
+        s[2] = static_cast<jlong>(segs[i].byte_len);
+        s[3] = segs[i].key_count;
+        s[4] = segs[i].flags;
+    }
+    if (!f.empty()) {
+        env->SetLongArrayRegion(seg_fields_out, 0, static_cast<jsize>(f.size()), f.data());
+    }
+    std::vector<jint> k(keys_len);
+    for (size_t i = 0; i < keys_len; ++i) {
+        k[i] = static_cast<jint>(keys[i]);
+    }
+    if (!k.empty()) {
+        env->SetIntArrayRegion(keys_out, 0, static_cast<jsize>(k.size()), k.data());
+    }
+    jlong counts[2] = {static_cast<jlong>(h.segment_count), static_cast<jlong>(keys_len)};
+    env->SetLongArrayRegion(counts_out, 0, 2, counts);
+    return PV_OK;
+}
+
+// The seek rule over a decoded index: out = [segment, key, key_time_us].
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeVideoIndexLocate(JNIEnv* env, jclass, jlongArray header,
+                                                              jlongArray seg_fields, jintArray keys,
+                                                              jlong time_us, jlongArray out) {
+    pv_video_index_header h{};
+    std::vector<pv_video_segment> segs;
+    std::vector<uint32_t> k;
+    if (!header_from_array(env, header, &h) || !segments_from_arrays(env, nullptr, seg_fields, h.segment_count, segs) ||
+        !keys_from_array(env, keys, k) || time_us < 0 || !out || env->GetArrayLength(out) < 3) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    size_t need = 0;
+    for (const pv_video_segment& s : segs) {
+        need += s.key_count;
+    }
+    if (need != k.size()) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    uint32_t seg = 0;
+    uint32_t key = 0;
+    uint64_t key_time = 0;
+    int rc = pv_video_index_locate(&h, segs.data(), k.data(), static_cast<uint64_t>(time_us), &seg, &key, &key_time);
+    if (rc == PV_OK) {
+        jlong v[3] = {seg, key, static_cast<jlong>(key_time)};
+        env->SetLongArrayRegion(out, 0, 3, v);
+    }
+    return rc;
 }
 
 #ifdef PV_DEBUG_HOOKS

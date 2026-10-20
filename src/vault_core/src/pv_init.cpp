@@ -51,6 +51,9 @@ const char* pv_error_name(int code) {
         case PV_ERR_ENVELOPE_NO_SLOT: return "PV_ERR_ENVELOPE_NO_SLOT";
         case PV_ERR_BUFFER_TOO_SMALL: return "PV_ERR_BUFFER_TOO_SMALL";
         case PV_ERR_CANCELLED: return "PV_ERR_CANCELLED";
+        case PV_ERR_INDEX_MALFORMED: return "PV_ERR_INDEX_MALFORMED";
+        case PV_ERR_INDEX_UNSUPPORTED: return "PV_ERR_INDEX_UNSUPPORTED";
+        case PV_ERR_NOT_INDEX: return "PV_ERR_NOT_INDEX";
         default: return "PV_ERR_UNKNOWN";
     }
 }

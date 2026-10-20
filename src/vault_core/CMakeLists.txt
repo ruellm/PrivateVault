@@ -9,6 +9,7 @@ add_library(vault_core STATIC
     src/pin.cpp
     src/envelope3.cpp
     src/viewer.cpp
+    src/video_index.cpp
 )
 
 target_include_directories(vault_core

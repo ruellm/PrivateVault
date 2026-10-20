@@ -152,6 +152,81 @@ int main(int argc, char** argv) {
     CHECK(count >= (argc > 1 ? 1 : 12));
     if (argc == 1) CHECK(item_count >= 4);
 
+    // Video index vectors (Phase 3C). An external directory has none.
+    std::ifstream vi_manifest(ts::u8path(dir + "/video_index.txt"));
+    if (argc == 1) CHECK(vi_manifest.good());
+    if (vi_manifest.good()) {
+        int vectors = 0;
+        int items = 0;
+        while (std::getline(vi_manifest, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            std::istringstream in(line);
+            std::string kind, name;
+            in >> kind >> name;
+            if (kind == "vector") {
+                unsigned segments = 0, audio = 0;
+                size_t keys_total = 0;
+                unsigned long long total = 0;
+                std::string hash_hex;
+                in >> segments >> keys_total >> total >> audio >> hash_hex;
+                CHECK(in);
+                ts::Bytes b = ts::read_file(dir + "/" + name + ".bin");
+                CHECK_EQ(ts::hex(ts::blake2b(b)), hash_hex);
+                pv_video_index_header h{};
+                size_t kt = 0;
+                CHECK_EQ(pv_video_index_decode_header(b.data(), b.size(), &h, &kt), PV_OK);
+                CHECK_EQ(h.segment_count, segments);
+                CHECK_EQ(kt, keys_total);
+                CHECK_EQ(h.total_duration_us, total);
+                CHECK_EQ(h.audio_codec, audio);
+                std::vector<pv_video_segment> segs(segments);
+                std::vector<uint32_t> keys(keys_total);
+                size_t kl = 0;
+                CHECK_EQ(pv_video_index_decode(b.data(), b.size(), &h, segs.data(), segs.size(), keys.data(), keys.size(), &kl), PV_OK);
+                CHECK_EQ(kl, keys_total);
+                CHECK_EQ(segs[0].start_us, 0u);
+                CHECK_EQ(keys[0], 0u);
+                // Re-encoding gives the same bytes.
+                ts::Bytes again(b.size());
+                size_t len = 0;
+                CHECK_EQ(pv_video_index_encode(&h, segs.data(), keys.data(), keys.size(), again.data(), again.size(), &len), PV_OK);
+                CHECK(again == b);
+                ++vectors;
+                std::printf("%s ok (%zu bytes, %u segments, %zu keys)\n", name.c_str(), b.size(), segments, keys_total);
+            } else if (kind == "item") {
+                std::string id_hex, hash_hex;
+                in >> id_hex >> hash_hex;
+                CHECK(in && id_hex.size() == 32 && hash_hex.size() == 64);
+                uint8_t id[PV_OBJECT_ID_BYTES];
+                CHECK_EQ(pv_object_id_from_hex(id_hex.c_str(), id), PV_OK);
+                // Decrypt through the item sink into memory and decode the payload as an index.
+                pv_source src{};
+                CHECK_EQ(pv_file_source_open((dir + "/" + name + ".pvo").c_str(), &src), PV_OK);
+                ts::MemSink payload;
+                pv_sink ps = payload.as_sink();
+                pv_sink item{};
+                CHECK_EQ(pv_sink_item_new(&ps, nullptr, &item), PV_OK);
+                uint64_t got_len = 0;
+                CHECK_EQ(pv_object_decrypt(ts::test_vmk(), PV_VMK_BYTES, &src, &item, id, &got_len), PV_OK);
+                pv_file_source_close(&src);
+                pv_item_header ih{};
+                CHECK_EQ(pv_sink_item_finish(&item, got_len, &ih), PV_OK);
+                CHECK_EQ(ih.media_type, PV_MEDIA_VIDEO_INDEX);
+                CHECK_EQ(ih.payload_len, payload.data.size());
+                CHECK_EQ(ts::hex(ts::blake2b(payload.data)), hash_hex);
+                pv_video_index_header h{};
+                size_t kt = 0;
+                CHECK_EQ(pv_video_index_decode_header(payload.data.data(), payload.data.size(), &h, &kt), PV_OK);
+                CHECK_EQ(h.segment_count, 3u);
+                CHECK_EQ(kt, 9u);
+                ++items;
+                std::printf("%s ok (item, index of %u segments)\n", name.c_str(), h.segment_count);
+            }
+        }
+        CHECK_EQ(vectors, 3);
+        CHECK_EQ(items, 1);
+    }
+
     // Envelope vectors. An external directory (Android export) has none.
     std::ifstream env_manifest(ts::u8path(dir + "/envelope3.txt"));
     if (argc == 1) CHECK(env_manifest.good());

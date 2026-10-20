@@ -1,0 +1,7 @@
+# Video index v1 vectors (Phase 3C). Synthetic values, TEST ONLY.
+# vector <name> <segments> <keys_total> <total_duration_us> <audio_codec> <blake2b of the bytes>
+# item <name> <object_id> <blake2b of the payload>: an item object (media_type 3) whose payload is video_index_three.bin
+vector video_index_min 1 1 3053000 0 a50b2c2f6d54c77e909c4997a9161b6e1e4eb57f70f9f1239b23225d27ecfc90
+vector video_index_three 3 9 9162000 0 5252d32fbf33bff8d1e60944eb913343c0f78631d47d1456bca2bcca5f93f32a
+vector video_index_audio 3 9 9162000 1 2cd177489adc53a789a07eebd7daab7279e6d3a3f063ef74095db98e00d2549a
+item item_video_index 7f9c4ec28058b88f1b8657bb9c56f3d2 5252d32fbf33bff8d1e60944eb913343c0f78631d47d1456bca2bcca5f93f32a

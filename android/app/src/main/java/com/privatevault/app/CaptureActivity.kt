@@ -382,7 +382,7 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
                     else say("test hooks are not in this build")
                 }
                 name == "test_hook_clear" -> if (BuildConfig.DEBUG) NativeBridge.nativeSetTestHooks(0, 0)
-                name == "video_probe" -> {
+                name == "video_probe" || name.startsWith("video_probe=") -> {
                     val runner = VideoProbes.get()
                     if (runner == null) say("$name: not available in this build")
                     else runner.run(name, this, imageCapture, camera, provider, lensFacing, vaults, ::say)

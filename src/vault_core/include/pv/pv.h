@@ -47,6 +47,12 @@ extern "C" {
 // Viewer codes (Phase 3B). See docs/PHASE3B_DESIGN.md Section 7.
 #define PV_ERR_BUFFER_TOO_SMALL 25
 #define PV_ERR_CANCELLED 26
+// Video index codes (Phase 3C). See docs/PHASE3C_DESIGN.md Section 4.
+#define PV_ERR_INDEX_MALFORMED 27
+#define PV_ERR_INDEX_UNSUPPORTED 28
+// The payload does not start with the index magic. A classification result,
+// like PV_ERR_NOT_ITEM.
+#define PV_ERR_NOT_INDEX 29
 
 // Sizes fixed by the format. Key sizes equal the libsodium constants; the
 // core checks that at compile time.
@@ -359,6 +365,91 @@ void pv_secure_free(void* p, size_t n);
 // A missing object file gives PV_ERR_NOT_FOUND (a lone partial is still
 // removed). Removal of the directory entry only; see the threat model.
 int pv_vault_delete_object(pv_vault* v, const uint8_t* object_id);
+
+// Video index, format version 1 (Phase 3C, docs/PHASE3C_DESIGN.md Section 4).
+// The payload of an item with media_type 3: a 64-byte header, then one
+// 48-byte record per segment, each followed by key_count u32 key-frame
+// offsets in microseconds from the segment start. Little-endian. Layout:
+//   header: 0 magic "PVVINDEX", 8 version, 10 header_len, 12 video_codec,
+//   14 rotation_degrees, 16 width, 20 height, 24 frame_rate_millihz,
+//   28 segment_count, 32 total_duration_us, 40 created_unix_ms,
+//   48 audio_codec, 50 audio_channels, 52 audio_sample_rate, 56 reserved (8)
+//   record: 0 object_id, 16 start_us, 24 duration_us, 32 byte_len,
+//   40 key_count, 44 flags, 48 key offsets
+#define PV_VIDEO_INDEX_MAGIC "PVVINDEX"
+#define PV_VIDEO_INDEX_VERSION 1
+#define PV_VIDEO_INDEX_HEADER_BYTES 64
+#define PV_VIDEO_INDEX_HEADER_MAX_BYTES 4096
+#define PV_VIDEO_INDEX_SEGMENT_BYTES 48
+#define PV_VIDEO_INDEX_MAX_SEGMENTS 16384u
+#define PV_VIDEO_INDEX_MAX_KEYS 4096u
+#define PV_VIDEO_INDEX_MAX_BYTES (8u * 1024u * 1024u)
+#define PV_VIDEO_INDEX_MAX_DIMENSION 16384u
+#define PV_VIDEO_INDEX_MAX_SEGMENT_BYTES (1024ull * 1024ull * 1024ull)
+#define PV_VIDEO_CODEC_H264 1
+#define PV_VIDEO_CODEC_H265 2
+#define PV_AUDIO_CODEC_NONE 0
+#define PV_AUDIO_CODEC_AAC 1
+
+typedef struct pv_video_index_header {
+    uint16_t version;
+    uint16_t header_len;
+    uint16_t video_codec;
+    uint16_t rotation_degrees;
+    uint32_t width;
+    uint32_t height;
+    uint32_t frame_rate_millihz;
+    uint32_t segment_count;
+    uint64_t total_duration_us;
+    uint64_t created_unix_ms;
+    uint16_t audio_codec;
+    uint16_t audio_channels;
+    uint32_t audio_sample_rate;
+} pv_video_index_header;
+
+typedef struct pv_video_segment {
+    uint8_t object_id[PV_OBJECT_ID_BYTES];
+    uint64_t start_us;
+    uint64_t duration_us;
+    uint64_t byte_len;
+    uint32_t key_count;
+    uint32_t flags;
+} pv_video_segment;
+
+// Rules checked by every function: version 1 (else PV_ERR_INDEX_UNSUPPORTED),
+// header_len 64 to 4096, video_codec 1 or 2, audio_codec 0 or 1 (else
+// UNSUPPORTED), rotation 0/90/180/270, width and height 1 to 16384,
+// segment_count 1 to 16384, audio fields zero when audio_codec is 0,
+// segment starts strictly increasing from 0, duration above 0, byte_len 1 to
+// 1 GiB, key_count 1 to 4096 per segment, key offsets strictly increasing
+// from 0 and below the duration, a segment ending at most one frame period
+// past the next start, total_duration equal to the end of the last segment,
+// and the whole index at most 8 MiB. Anything else: PV_ERR_INDEX_MALFORMED.
+
+// Bytes the index needs for h and segs (header, records, key offsets).
+int pv_video_index_size(const pv_video_index_header* h, const pv_video_segment* segs,
+                        size_t* out);
+// Writes the index. keys holds the key offsets of all segments back to back
+// in segment order; keys_len must equal the sum of key_count. A cap below
+// the size gives PV_ERR_BUFFER_TOO_SMALL and writes nothing.
+int pv_video_index_encode(const pv_video_index_header* h, const pv_video_segment* segs,
+                          const uint32_t* keys, size_t keys_len, uint8_t* out, size_t cap,
+                          size_t* out_len);
+// Reads and checks the header and the record chain without copying the
+// records; *keys_total is the number of key offsets in the index.
+int pv_video_index_decode_header(const uint8_t* buf, size_t len, pv_video_index_header* out,
+                                 size_t* keys_total);
+// Reads everything. segs_cap and keys_cap are entry counts; too small gives
+// PV_ERR_BUFFER_TOO_SMALL after the header has been checked.
+int pv_video_index_decode(const uint8_t* buf, size_t len, pv_video_index_header* h_out,
+                          pv_video_segment* segs_out, size_t segs_cap, uint32_t* keys_out,
+                          size_t keys_cap, size_t* keys_len_out);
+// The seek rule: the last segment starting at or before time_us and its last
+// key frame at or before time_us; a time past the end gives the last key
+// frame of the last segment. key_time_us_out is that key frame's clip time.
+int pv_video_index_locate(const pv_video_index_header* h, const pv_video_segment* segs,
+                          const uint32_t* keys, uint64_t time_us, uint32_t* segment_out,
+                          uint32_t* key_out, uint64_t* key_time_us_out);
 
 #ifdef __cplusplus
 }

@@ -34,6 +34,7 @@ pv_add_test(test_item_objects)
 pv_add_test(test_pin_stretch)
 pv_add_test(test_envelope3)
 pv_add_test(test_viewer_buffer)
+pv_add_test(test_video_index)
 set_tests_properties(test_large test_bounded_memory PROPERTIES LABELS "large" TIMEOUT 1800)
 
 if(PV_TEST_HOOKS)

@@ -36,6 +36,10 @@ object NativeBridge {
     // Viewer codes (Phase 3B).
     const val ERR_BUFFER_TOO_SMALL = 25
     const val ERR_CANCELLED = 26
+    // Video index codes (Phase 3C). NOT_INDEX is a classification: no magic.
+    const val ERR_INDEX_MALFORMED = 27
+    const val ERR_INDEX_UNSUPPORTED = 28
+    const val ERR_NOT_INDEX = 29
 
     const val VMK_BYTES = 32
     const val OBJECT_ID_BYTES = 16
@@ -46,6 +50,18 @@ object NativeBridge {
     const val MEDIA_VIDEO_SEGMENT = 2
     const val MEDIA_VIDEO_INDEX = 3
     const val ITEM_HEADER_BYTES = 48
+
+    // Video index v1 (docs/PHASE3C_DESIGN.md Section 4.2).
+    const val VIDEO_INDEX_VERSION = 1
+    const val VIDEO_INDEX_HEADER_BYTES = 64
+    const val VIDEO_INDEX_SEGMENT_BYTES = 48
+    const val VIDEO_INDEX_MAX_SEGMENTS = 16384
+    const val VIDEO_INDEX_MAX_KEYS = 4096
+    const val VIDEO_INDEX_MAX_BYTES = 8 shl 20
+    const val VIDEO_CODEC_H264 = 1
+    const val VIDEO_CODEC_H265 = 2
+    const val AUDIO_CODEC_NONE = 0
+    const val AUDIO_CODEC_AAC = 1
 
     const val PIN_SALT_BYTES = 16
     const val KEK_BYTES = 32
@@ -141,7 +157,8 @@ object NativeBridge {
     external fun nativeObjectPlaintextSize(handle: Long, id: ByteArray, out: LongArray): Int
     // infoOut = [item_status, media_type, rotation, width, height, created_unix_ms,
     // payload_len, header_len, plaintext_len]; bufferOut[0] is a direct buffer over the
-    // whole plaintext for a JPEG item only, to be given back to nativeViewerFree.
+    // whole plaintext for an item of a known media type (JPEG, video segment, video
+    // index; Phase 3C widened it from JPEG), to be given back to nativeViewerFree.
     external fun nativeViewerLoad(
         handle: Long, id: ByteArray, cap: Long, infoOut: LongArray, bufferOut: Array<ByteBuffer?>
     ): Int
@@ -149,6 +166,29 @@ object NativeBridge {
     // The flag pv_vault_decrypt_to_buffer polls; Vault.close sets and clears it.
     external fun nativeSetViewerCancel(cancel: Boolean)
     external fun nativeDeleteObject(handle: Long, id: ByteArray): Int
+
+    // Phase 3C video index (docs/PHASE3C_DESIGN.md Section 4.4). The header is a
+    // LongArray of 13: [version, header_len, video_codec, rotation, width, height,
+    // frame_rate_millihz, segment_count, total_duration_us, created_unix_ms,
+    // audio_codec, audio_channels, audio_sample_rate]. Segments cross as a flat
+    // ByteArray of IDs and a LongArray of 5 per segment: [start_us, duration_us,
+    // byte_len, key_count, flags]; key offsets as one IntArray in segment order.
+    // Encode returns the bytes or null, with the status in statusOut[0].
+    external fun nativeVideoIndexEncode(
+        header: LongArray, ids: ByteArray, segFields: LongArray, keys: IntArray, statusOut: IntArray
+    ): ByteArray?
+    external fun nativeVideoIndexDecodeHeader(
+        buf: ByteArray, offset: Int, length: Int, headerOut: LongArray, keysTotalOut: LongArray
+    ): Int
+    // countsOut = [segments, keys]. Output arrays are sized from a decode_header.
+    external fun nativeVideoIndexDecode(
+        buf: ByteArray, offset: Int, length: Int, headerOut: LongArray, idsOut: ByteArray,
+        segFieldsOut: LongArray, keysOut: IntArray, countsOut: LongArray
+    ): Int
+    // out = [segment, key, key_time_us].
+    external fun nativeVideoIndexLocate(
+        header: LongArray, segFields: LongArray, keys: IntArray, timeUs: Long, out: LongArray
+    ): Int
 
     // Phase 2. fields = [media_type, rotation_degrees, width, height, created_unix_ms].
     // Direct buffer: the native side reads the bytes in place.

@@ -23,6 +23,14 @@ TEST ONLY. Everything in this directory is synthetic and public. Nothing here is
   `PVTESTONLYSALT01`, the Argon2id parameters, the Argon2id output `k_pin_hex` for them,
   the alias, and the vector names; both platforms check their PIN stretch against
   `k_pin_hex` and open both envelopes to the test VMK.
+- `video_index_min.bin`, `video_index_three.bin`, `video_index_audio.bin` (Phase 3C): video
+  index v1 payloads (`docs/PHASE3C_DESIGN.md` Section 4) with one segment and one key, three
+  segments with 3, 2, and 4 keys, and the same three segments with the audio fields set (AAC,
+  2 channels, 48 000 Hz) so a 3C reader accepts a 3E header. `item_video_index.pvo` is an
+  item object of media type 3 whose payload is `video_index_three.bin`, under the test VMK.
+  `video_index.txt` records segment and key counts, total duration, audio codec, the BLAKE2b
+  of each index, and the object ID and payload hash of the item. Both platforms decode them
+  and re-encode to the same bytes.
 
 Generated with `make_vectors` (`tests/tools/make_vectors.cpp`). The Phase 1 vectors were
 written once in Phase 1; the item vectors were added in Phase 2 with the `--items` mode,
@@ -32,6 +40,7 @@ which leaves the other files and manifest lines as they are:
 build\windows-x64-tests\tests\core\Debug\make_vectors.exe tests\fixtures\v1            # everything (do not run casually)
 build\windows-x64-tests\tests\core\Debug\make_vectors.exe tests\fixtures\v1 --items    # item vectors only
 build\windows-x64-tests\tests\core\Debug\make_vectors.exe tests\fixtures\v1 --envelope3   # envelope vectors only (Phase 3A)
+build\windows-x64-tests\tests\core\Debug\make_vectors.exe tests\fixtures\v1 --video-index   # video index vectors only (Phase 3C)
 ```
 
 Regenerating produces different bytes (fresh data keys, nonces, and stream headers) for the

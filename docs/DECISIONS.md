@@ -442,3 +442,65 @@ and traces stay under `D:\pv-heap\`, outside the repository, and are deleted aft
 
 Alternative proposed and rejected: an own Python HPROF reader for the retaining paths,
 which would have given retention but no allocation stacks.
+
+## D-028 Sync frames: the framework extractor reports fragment starts, the container carries every key frame (2026-10-19, approved at the Phase 3C checkpoint)
+
+Measured on the emulator and the Xiaomi (12 clips, 48 segments): the `FragmentedMp4Muxer`
+writes a per-sample flags word in every `trun` (flags 0x701) and clears the non-sync bit
+for exactly the frames the encoder flagged as key frames; media3's `FragmentedMp4Extractor`
+reports the same count; the framework `MediaExtractor` reports one sync sample per `moof`,
+whatever the per-sample flags say. The Phase 2 mismatch (2/4/4/3 against 2/2/2/2) was the
+framework reader over two fragments per segment.
+
+Choice: seeking keys off an index of encoder key-frame times (D-029); playback uses media3,
+which honours the per-sample flags; the framework extractor is used nowhere in the video
+path. Fragment duration is set equal to the GOP so that even a framework-style reader sees
+every key frame.
+
+Alternatives: trusting the framework extractor (loses every key frame but the first per
+fragment); fragments of one GOP only (chosen anyway, for the reader independence it
+brings).
+
+## D-029 Video settings: time-based sync requests, 3 s segments of three GOPs, fragment equal to the GOP (2026-10-19, approved at the Phase 3C checkpoint; segments are cut on the actual key-frame output and the index records actual key-frame times)
+
+Measured: both encoders count `KEY_I_FRAME_INTERVAL` in frames at the configured frame
+rate, so with 30 configured and 14 delivered the Xiaomi placed key frames 2.2 s apart; the
+boundary sync request plus the periodic key frame gave paired key frames 33 to 260 ms apart
+on the emulator.
+
+Choice: the app requests a sync frame every 1 s of PTS, cuts a segment at every third
+requested key frame, sets `KEY_I_FRAME_INTERVAL` to 10 s as a backstop, gives the encoder
+the delivered frame rate, and uses a 1000 ms fragment duration. Segment and GOP lengths
+then hold in time on every encoder, and the seek grid is predictable.
+
+Alternatives: `KEY_I_FRAME_INTERVAL` 1 s with the nominal rate (2.2 s GOPs on the phone);
+cutting on the encoder's periodic key frames (segments of unpredictable length); fragment
+500 ms (no effect, fragments start on key frames only).
+
+## D-030 Index v1: a fixed header with audio fields and header_len, 48-byte segment records, u32 key offsets, magic PVVINDEX (2026-10-19, approved at the Phase 3C checkpoint; the 4096 key bound is per segment)
+
+Choice: the layout of `docs/PHASE3C_DESIGN.md` Section 4.2, encoded and decoded in the core
+with every field validated, bounded at 16384 segments, 4096 keys per segment, and 8 MiB. A
+new magic keeps the Phase 2 prototype indexes unknown items without migration. Audio fields
+are present and zero so a 3E writer needs no version change; `header_len` lets a later
+header grow.
+
+Alternatives: a text or TLV format (more code to validate for no gain at this size);
+recording key frames as absolute clip times in u64 (twice the size; offsets from the
+segment start fit u32 for any segment under 71 minutes); migrating the prototype indexes
+(nothing of value in them; they are test recordings).
+
+## D-031 Playback probe: ExoPlayer over a guarded-memory DataSource, one MediaItem per segment, media3 only in debug (2026-10-19, approved at the Phase 3C checkpoint)
+
+Choice: `media3-exoplayer` 1.11.1 in the debug variant only; a custom `DataSource` that
+decrypts a segment into guarded memory on `open` and wipes it on `close`; a playlist of
+segment items over `FragmentedMp4Extractor` with default flags; seeks resolved by the
+core's `locate`; at most the current and the next segment decrypted at once; the player
+released and the buffers wiped on every lock trigger. Plaintext copies inside media3 and
+the codec are listed, not claimed.
+
+Alternatives: the framework `MediaPlayer` or a bare `MediaCodec` loop (no per-sample sync
+reading in the former; the latter is the 3D amount of work the probe should measure, not
+replace); one concatenated stream across segments (several `moov` boxes in one stream are
+not a valid fragmented MP4); decrypting the whole clip (defeats the segment design and the
+memory bound).

@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Declared by androidx.media3:media3-exoplayer (debug only); the probe
+         holds no wake lock. -->
+    <uses-permission
+        android:name="android.permission.WAKE_LOCK"
+        tools:node="remove" />
 
     <!-- Debug variant only: the exported entry point for scripted runs
          (D-019). The benchmark and release variants have no such activity. -->
@@ -9,6 +16,11 @@
             android:exported="true"
             android:excludeFromRecents="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- Stage 3C playback probe (docs/PHASE3C_DESIGN.md Section 5). -->
+        <activity
+            android:name=".VideoProbeActivity"
+            android:exported="false" />
     </application>
 
 </manifest>

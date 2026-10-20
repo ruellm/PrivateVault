@@ -239,3 +239,38 @@ claim. Design: `docs/PHASE3B_DESIGN.md`.
   that. The Phase 4 experiment is the first attempt to make such copies less useful and
   promises nothing.
 - Nothing here has been independently reviewed.
+
+## 9. Phase 3C additions: video groundwork (approved 2026-10-19 at the Milestone B checkpoint, to be confirmed at Milestone E)
+
+What Stage 3C claims, and only this: **a video clip stays encrypted on disk as segment
+objects plus one index object, is decrypted for playback one or two segments at a time
+into memory the app controls and wipes, and nothing of it is written to storage.** The
+playback probe exists in the debug variant only. Design: `docs/PHASE3C_DESIGN.md`.
+
+### 9.1 New assets
+
+| Asset | Where it lives | Lifetime |
+|---|---|---|
+| Decrypted segment (fragmented MP4, 0.5 to 2 MB) | One guarded block per segment, at most two at once | Until the player moves past the segment, stops, or locks; wiped on free |
+| Sample copies inside the player | media3 allocator arrays and extractor scratch in the Java heap; `MediaCodec` input buffers | Until the player is released and the collector runs; outside app control |
+| Decoded frames | Codec output and surface buffers, GPU, compositor | Per frame; outside app control; `FLAG_SECURE` and a secure surface keep them out of captures and recents |
+| Index content | Segment list, durations, key-frame grid, codec and size, creation time | Inside one encrypted object; decrypted into a Kotlin structure while a clip is open |
+
+### 9.2 Threats and the Stage 3C position
+
+| # | Threat | Position |
+|---|---|---|
+| T33 | Screenshot, recording, or recents card of playback | `FLAG_SECURE` on the probe window and `SurfaceView.setSecure(true)`; checked on both devices. |
+| T34 | Plaintext left in memory after playback | Guarded buffers wiped on close, transition, stop, and lock (counter checked in T2). media3 and codec copies are not wiped by the app; releasing the player drops the references. |
+| T35 | Lock while a segment is decrypting or playing | Decrypt cancelled through the 3B flag and the buffer wiped; player released; activity finished. |
+| T36 | Clip structure visible on disk | Segment objects of one clip share sizes and adjacent modification times, and the index is a small object beside them (Phase 2 position: documented, not hidden). The structure itself (durations, key grid) is inside the encrypted index. |
+| T37 | A damaged or foreign index | Every field is validated in the core before any segment is touched; a segment that fails to decrypt stops playback with the code name. |
+
+### 9.3 Residual risks
+
+- Java-heap copies of segment data inside media3 and native copies inside the codec are
+  outside the app on every device (9.1).
+- The probe writes recordings as test objects into the vault; they are deleted only with
+  the developer's agreement.
+- Nothing here has been independently reviewed; media3 is an external library processing
+  plaintext in the debug build.

@@ -149,9 +149,10 @@ class Vault private constructor(val dir: File, private var handle: Long) {
         return out[0]
     }
 
-    // Result of a viewer load. The buffer, present for JPEG items only, is
-    // guarded native memory holding the whole plaintext; close wipes and
-    // frees it exactly once. payload is a view starting after the header.
+    // Result of a viewer load. The buffer, present for items of a known media
+    // type only, is guarded native memory holding the whole plaintext; close
+    // wipes and frees it exactly once. payload is a view starting after the
+    // header.
     class ViewerLoad(
         val status: Int, val itemStatus: Int, val item: ItemInfo?, val plaintextLen: Long,
         buffer: ByteBuffer?

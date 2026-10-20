@@ -51,8 +51,19 @@ APIs used and the documentation pages checked on 2026-10-12:
 | Ninja | bundled with Android SDK CMake 4.1.2 (`cmake/4.1.2/bin/ninja.exe`), used by the Android presets |
 | Android SDK | platforms android-35, build-tools 37.0.0 and 35.0.0 (the latter installed by AGP 8.8.2 on the first build, 2026-10-13), platform-tools 37.0.1, cmdline-tools 23.0.0, emulator 37.2.12, system image android-35 google_apis_playstore x86_64 rev 9 |
 | Android NDK | 29.0.14206865 (r29), clang 21.0.0 based on r563880c, platforms 21 to 35. See `docs/DECISIONS.md` D-003. |
-| JDK | OpenJDK 21.0.4 (Android Studio JBR) |
-| Android Studio | AI-242.23726.103 (Ladybug Feature Drop 2024.2.2); supports AGP up to 8.8, so it cannot open the project after D-012 until the developer updates it |
+| JDK | OpenJDK 21.0.4 (Android Studio JBR) in Phases 1 to 3B; Temurin 21.0.12.1 from Stage 3C on (above) |
+| Android Studio | AI-242.23726.103 (Ladybug Feature Drop 2024.2.2) through Stage 3B; AI-262 from 2026-10-19 (opens the AGP 8.9 project; its bundled JBR 25 does not run Gradle 8.11.1) |
+
+## JDK for Gradle (added 2026-10-19, Stage 3C)
+
+| | |
+|---|---|
+| Role | Runs Gradle 8.11.1 and the Android Gradle Plugin. Gradle 8.11.1 supports Java 17 to 23; the JDK bundled with the updated Android Studio (AI-262, JBR 25.0.3) is not supported and fails the build at startup. |
+| Version | Eclipse Temurin JDK 21.0.12.1+1 (LTS), Windows x64, zip (no installer) |
+| Source | https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_windows_hotspot_21.0.12.1_1.zip |
+| Verification | SHA-256 `f9d6e191ab098c0d416e7d588a24420a8621cd2f4720dab2459b8b7b2d2d8b4e`, equal to the checksum published by Adoptium beside the archive (`...zip.sha256.txt`) and to the value the Adoptium release API reports (checked 2026-10-19) |
+| License | GPLv2 with Classpath Exception |
+| Location | `D:\tools\jdk-21` (the archive's `jdk-21.0.12.1+1` directory), used through `JAVA_HOME` in the build scripts only; no PATH or registry change, no setting in the repository |
 
 ## Gradle and Android Gradle Plugin
 
@@ -136,6 +147,13 @@ video prototype (`media3-common` and `media3-container` 1.11.1 with it); 1.11.1 
 The viewer adds no dependency: `GridView`, `ImageDecoder`, `android.media.ExifInterface`, and
 the gesture detectors are platform classes (D-026). The `ACCESS_NETWORK_STATE` merge rule of
 D-013 stays because the debug variant still carries `media3-common`.
+
+## Phase 3C Android dependencies (debug variant only, 2026-10-19)
+
+| Dependency | Version | Configuration | Role |
+|---|---|---|---|
+| `androidx.media3:media3-extractor` | 1.11.1 | `debugImplementation` | `FragmentedMp4Extractor` for the key-frame investigation (reads the container the media3 way beside the framework extractor). Brings `media3-decoder` 1.11.1. Debug APK 17.6 to 28.6 MB; release and benchmark unchanged (0 media3 classes). |
+| `androidx.media3:media3-exoplayer` | 1.11.1 | `debugImplementation` (Milestone D) | ExoPlayer for the playback probe (`VideoProbeActivity`, `GuardedSegmentDataSource`). Brings `media3-datasource`, `media3-database`, `media3-container` (resolved tree in `docs/PHASE3C_PROGRESS.md`). Its manifest declares `WAKE_LOCK`; the debug manifest removes it (`tools:node="remove"`), as the main manifest does for `ACCESS_NETWORK_STATE`. Release and benchmark unchanged (0 media3 classes). |
 
 ## Phase 3A Android dependencies (added in Milestone D, 2026-10-14)
 

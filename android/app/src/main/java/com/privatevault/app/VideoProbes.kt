@@ -18,6 +18,10 @@ interface VideoProbeRunner {
 object VideoProbes {
     @Volatile private var runner: VideoProbeRunner? = null
 
+    // Stage 3C playback probe launcher (debug source set): opens the probe
+    // screen on the index object named by the argument of video_play.
+    @Volatile var playback: ((Context, String) -> Unit)? = null
+
     fun install(r: VideoProbeRunner) {
         runner = r
     }

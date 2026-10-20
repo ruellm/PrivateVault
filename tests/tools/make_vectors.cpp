@@ -10,6 +10,9 @@
 //   make_vectors <output_dir> --envelope3   only the provider 3 envelope vectors
 //                                        (envelope3_*.key and envelope3.txt);
 //                                        manifest.txt and the objects are kept
+//   make_vectors <output_dir> --video-index  only the video index vectors (Phase 3C:
+//                                        video_index_*.bin, item_video_index.pvo,
+//                                        video_index.txt); everything else is kept
 //
 // Manifest columns: name length chunk_size blake2b object_id media_type
 // rotation width height created_unix_ms payload_len. For an item vector the
@@ -235,6 +238,129 @@ int write_envelope_vectors(const std::string& dir) {
     return 0;
 }
 
+// Phase 3C: video index v1 vectors (docs/PHASE3C_DESIGN.md Section 4.5).
+// Three raw indexes and one item object whose payload is the three-segment
+// index, under the test VMK. video_index.txt records the fields and the
+// payload hash so both platforms check what they decode.
+int write_video_index_vectors(const std::string& dir) {
+    struct IndexSpec {
+        const char* name;
+        uint32_t segments;
+        std::vector<uint32_t> keys_per_segment;
+        uint16_t audio_codec;
+        uint16_t audio_channels;
+        uint32_t audio_rate;
+    };
+    const IndexSpec specs[] = {
+        {"video_index_min", 1, {1}, PV_AUDIO_CODEC_NONE, 0, 0},
+        {"video_index_three", 3, {3, 2, 4}, PV_AUDIO_CODEC_NONE, 0, 0},
+        {"video_index_audio", 3, {3, 2, 4}, PV_AUDIO_CODEC_AAC, 2, 48000},
+    };
+    std::string text = "# Video index v1 vectors (Phase 3C). Synthetic values, TEST ONLY.\n"
+                       "# vector <name> <segments> <keys_total> <total_duration_us> <audio_codec> <blake2b of the bytes>\n"
+                       "# item <name> <object_id> <blake2b of the payload>: an item object (media_type 3) whose payload is video_index_three.bin\n";
+    std::vector<uint8_t> three;
+    for (const IndexSpec& sp : specs) {
+        pv_video_index_header h{};
+        h.version = PV_VIDEO_INDEX_VERSION;
+        h.header_len = PV_VIDEO_INDEX_HEADER_BYTES;
+        h.video_codec = PV_VIDEO_CODEC_H264;
+        h.rotation_degrees = 90;
+        h.width = 1600;
+        h.height = 1200;
+        h.frame_rate_millihz = 14200;
+        h.segment_count = sp.segments;
+        h.created_unix_ms = kCreated;
+        h.audio_codec = sp.audio_codec;
+        h.audio_channels = sp.audio_channels;
+        h.audio_sample_rate = sp.audio_rate;
+        std::vector<pv_video_segment> segs;
+        std::vector<uint32_t> keys;
+        uint64_t start = 0;
+        for (uint32_t i = 0; i < sp.segments; ++i) {
+            pv_video_segment g{};
+            std::string seg_name = std::string(sp.name) + "_segment_" + std::to_string(i);
+            fixed_id(seg_name.c_str(), g.object_id);
+            g.start_us = start;
+            g.duration_us = 3053000 + 1000 * i;   // the phone's segment length, with a small difference per segment
+            g.byte_len = 1746306 + 262271 * i;
+            g.key_count = sp.keys_per_segment[i];
+            segs.push_back(g);
+            for (uint32_t k = 0; k < g.key_count; ++k) {
+                keys.push_back(k * (static_cast<uint32_t>(g.duration_us) / g.key_count));
+            }
+            start += g.duration_us;
+        }
+        h.total_duration_us = start;
+        size_t size = 0;
+        if (pv_video_index_size(&h, segs.data(), &size) != PV_OK) {
+            std::fprintf(stderr, "%s: size failed\n", sp.name);
+            return 2;
+        }
+        std::vector<uint8_t> out(size);
+        size_t len = 0;
+        int rc = pv_video_index_encode(&h, segs.data(), keys.data(), keys.size(), out.data(), out.size(), &len);
+        if (rc != PV_OK) {
+            std::fprintf(stderr, "%s: %s\n", sp.name, pv_error_name(rc));
+            return 2;
+        }
+        const std::string path = dir + "/" + sp.name + ".bin";
+        pv_file_delete(path.c_str());
+        if (pv_file_write_atomic(path.c_str(), out.data(), len) != PV_OK) {
+            std::fprintf(stderr, "cannot write %s\n", path.c_str());
+            return 2;
+        }
+        uint8_t digest[PV_HASH_BYTES];
+        crypto_generichash(digest, sizeof(digest), out.data(), len, nullptr, 0);
+        char buf[256];
+        std::snprintf(buf, sizeof(buf), "vector %s %u %zu %llu %u %s\n", sp.name, sp.segments, keys.size(),
+                      static_cast<unsigned long long>(h.total_duration_us), sp.audio_codec, hex(digest, sizeof(digest)).c_str());
+        text += buf;
+        if (std::string(sp.name) == "video_index_three") {
+            three = out;
+        }
+        std::printf("wrote %s (%zu bytes)\n", sp.name, len);
+    }
+    // The item object: header fields of a clip, payload = the three-segment index.
+    uint8_t id[PV_OBJECT_ID_BYTES];
+    fixed_id("item_video_index", id);
+    pv_item_header ih{};
+    ih.item_version = PV_ITEM_VERSION;
+    ih.header_len = PV_ITEM_HEADER_BYTES;
+    ih.media_type = PV_MEDIA_VIDEO_INDEX;
+    ih.rotation_degrees = 90;
+    ih.width = 1600;
+    ih.height = 1200;
+    ih.created_unix_ms = kCreated;
+    ih.payload_len = three.size();
+    uint8_t raw[PV_ITEM_HEADER_BYTES];
+    size_t raw_len = 0;
+    if (pv_item_header_encode(&ih, raw, sizeof(raw), &raw_len) != PV_OK) {
+        return 2;
+    }
+    const uint8_t* parts[] = {raw, three.data()};
+    const size_t lens[] = {raw_len, three.size()};
+    pv_source src{};
+    if (pv_source_memory_new(parts, lens, 2, &src) != PV_OK) {
+        return 2;
+    }
+    int rc = write_object(dir + "/item_video_index.pvo", &src, PV_DEFAULT_CHUNK_SIZE, id);
+    pv_source_memory_free(&src);
+    if (rc != 0) {
+        return rc;
+    }
+    uint8_t digest[PV_HASH_BYTES];
+    crypto_generichash(digest, sizeof(digest), three.data(), three.size(), nullptr, 0);
+    text += "item item_video_index " + hex(id, sizeof(id)) + " " + hex(digest, sizeof(digest)) + "\n";
+    const std::string tpath = dir + "/video_index.txt";
+    pv_file_delete(tpath.c_str());
+    if (pv_file_write_atomic(tpath.c_str(), reinterpret_cast<const uint8_t*>(text.data()), text.size()) != PV_OK) {
+        return 2;
+    }
+    std::printf("wrote item_video_index.pvo, video_index.txt\n");
+    return 0;
+}
+
 std::string first_word(const std::string& line) {
     std::istringstream in(line);
     std::string w;
@@ -254,9 +380,10 @@ int field_count(const std::string& line) {
 
 int main(int argc, char** argv) {
     const bool envelope_only = argc == 3 && std::strcmp(argv[2], "--envelope3") == 0;
+    const bool index_only = argc == 3 && std::strcmp(argv[2], "--video-index") == 0;
     if (argc < 2 || argc > 3 ||
-        (argc == 3 && std::strcmp(argv[2], "--items") != 0 && !envelope_only)) {
-        std::fprintf(stderr, "usage: make_vectors <output_dir> [--items|--envelope3]\n");
+        (argc == 3 && std::strcmp(argv[2], "--items") != 0 && !envelope_only && !index_only)) {
+        std::fprintf(stderr, "usage: make_vectors <output_dir> [--items|--envelope3|--video-index]\n");
         return 1;
     }
     if (pv_init() != PV_OK) {
@@ -265,6 +392,9 @@ int main(int argc, char** argv) {
     const std::string dir = argv[1];
     if (envelope_only) {
         return write_envelope_vectors(dir);
+    }
+    if (index_only) {
+        return write_video_index_vectors(dir);
     }
     const bool items_only = argc == 3;
     const uint32_t c = PV_MIN_CHUNK_SIZE;

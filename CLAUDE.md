@@ -1,10 +1,10 @@
 # PrivateVault: notes for Claude Code
 
 Read `PROJECT_HANDOFF.md` first. It is the canonical brief for this repository; the
-developer supplies a per-phase brief (`PHASE3B_BRIEF.md` for Stage 3B, `PHASE3A_BRIEF.md`
-before it). `docs/PHASE3B_PROGRESS.md` records the current state and the commands that were
-run (`docs/PHASE1_PROGRESS.md`, `docs/PHASE2_PROGRESS.md`, and `docs/PHASE3A_PROGRESS.md`
-for the earlier phases).
+developer supplies a per-phase brief (`PHASE3C_BRIEF.md` for Stage 3C, `PHASE3B_BRIEF.md`
+and `PHASE3A_BRIEF.md` before it). `docs/PHASE3C_PROGRESS.md` records the current state and
+the commands that were run (`docs/PHASE1_PROGRESS.md`, `docs/PHASE2_PROGRESS.md`,
+`docs/PHASE3A_PROGRESS.md`, and `docs/PHASE3B_PROGRESS.md` for the earlier phases).
 
 ## Layout
 
@@ -29,6 +29,8 @@ for the earlier phases).
 - Android app: `android/gradlew.bat assembleDebug` from `android/`; `lintDebug` must stay
   clean (`RestrictedApi` is an error); `assembleBenchmark` builds the non-debuggable variant.
 - Android Studio must be Meerkat (2024.3.1) or later for AGP 8.9.
+- Gradle needs JDK 17 to 23; the project uses `D:\tools\jdk-21` (Android Studio's bundled
+  JDK 25 is not supported by Gradle 8.11.1). Set `JAVA_HOME` to it for every Gradle call.
 - Keep build output, caches, and downloads on drive D.
 
 ## Rules
