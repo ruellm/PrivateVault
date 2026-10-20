@@ -154,7 +154,7 @@ both devices.
 | Same-position seek renders nothing; first-frame callback can arrive late from an earlier seek | the probe plans distinct landings and waits on the frame listener | `VideoProbeActivity.kt` |
 | `release()` returns before the loader closes an open data source | the probe waits for the close (0 to 5 ms measured) | `VideoProbeActivity.kt` |
 | Scripted runs on the phone need the screen awake | a dozing screen, or the screen timing out during the 12 s PIN unlock, stops the activities and locks the vault (two runs lost) | this report, `docs/PHASE3C_PROGRESS.md` |
-| Unlock time on the phone | 12.4 to 21.0 s per unlock on this day against about 4 s measured in 3B; not investigated in 3C | known limit below |
+| Unlock time on the phone | debug-build unlock at the final KDF default (ops 2, 256 MiB) is 12 to 21 s on the phone, consistent with 3A and 3B (3B measured 12.8 s debug, 0.97 s benchmark); the benchmark build unlocks in under 1 s | known limit below |
 
 Decisions: D-028 to D-031 approved and implemented as written; no new decision.
 
@@ -163,8 +163,9 @@ Decisions: D-028 to D-031 approved and implemented as written; no new decision.
 - The by-hand interrupt cases on the phone hit the probe while it held the last frame after
   the 11.6 s clip (the player alive and paused), not mid-clip; the code path (`onStop`
   releases, the lock follows) is the same.
-- The unlock slowness on the phone this day was not analysed (thermal state and battery
-  mode unknown); it did not affect the measurements.
+- The scripted runs on the phone used the debug build, whose unlock at ops 2 / 256 MiB
+  takes 12 to 21 s (consistent with 3A and 3B); the benchmark build unlocks in under 1 s.
+  The wait only sets the timing of the by-hand actions; it does not enter the measurements.
 - No measurement of the ExoPlayer sample-queue footprint beyond the Java heap peak.
 - The emulator picture was checked by pixel sample, not by eye.
 

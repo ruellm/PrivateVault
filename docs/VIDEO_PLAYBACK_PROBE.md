@@ -153,7 +153,7 @@ logs `build/p3c/phone/E*.txt`.
 | Decoded first frame of each segment, mean luma | not measured then; the clip played back as a near-black picture (Section 6.3) | 134, 135, 137, 128 |
 | Encrypt per segment (debug build) | 69 to 153 ms for 0.95 to 2.25 MB (14.6 MB/s) | similar |
 | Process during the recording | CPU 11 310 ms over 19 958 ms wall (56 %, the meter wait included), PSS peak 132.7 MiB, native heap peak 38.8 MiB | similar |
-| Unlock (PIN, final KDF default) before each run | 12.4 to 21.0 s on this day (3B measured about 4 s; the phone was warm and on battery saver level unknown; not investigated here) | |
+| Unlock (PIN, final KDF default, debug build) before each run | 12 to 21 s (ops 2, 256 MiB; consistent with 3A and 3B; the benchmark build unlocks in under 1 s) | |
 
 The delivered rate of 14.4 fps in the first clip repeats the Milestone A finding (14.2 fps at
 the prototype size); the aimed clip, held upright towards a window, delivered 24.9 fps.
