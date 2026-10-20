@@ -1068,6 +1068,34 @@ Java_com_privatevault_app_NativeBridge_nativeViewerLoad(JNIEnv* env, jclass, jlo
     return PV_OK;
 }
 
+// Item header of an object from its first chunk (pv_object_item_header).
+// Returns the core status; on PV_OK info_out = [media_type, rotation, width,
+// height, created_unix_ms, payload_len, header_len, plaintext_len].
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeObjectItemHeader(JNIEnv* env, jclass, jlong handle,
+                                                              jbyteArray id, jlongArray info_out) {
+    std::vector<uint8_t> oid;
+    if (!copy_bytes(env, id, PV_OBJECT_ID_BYTES, oid) || !info_out ||
+        env->GetArrayLength(info_out) < 8) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    pv_item_header h{};
+    uint64_t len = 0;
+    int rc = pv_object_item_header(handle_to_vault(handle), oid.data(), &h, &len);
+    if (rc == PV_OK) {
+        jlong info[8] = {h.media_type,
+                         h.rotation_degrees,
+                         static_cast<jlong>(h.width),
+                         static_cast<jlong>(h.height),
+                         static_cast<jlong>(h.created_unix_ms),
+                         static_cast<jlong>(h.payload_len),
+                         h.header_len,
+                         static_cast<jlong>(len)};
+        env->SetLongArrayRegion(info_out, 0, 8, info);
+    }
+    return rc;
+}
+
 // Wipes and frees a buffer from nativeViewerLoad.
 JNIEXPORT void JNICALL
 Java_com_privatevault_app_NativeBridge_nativeViewerFree(JNIEnv* env, jclass, jobject buffer) {

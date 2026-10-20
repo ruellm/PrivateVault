@@ -277,7 +277,18 @@ class V3Probe(
         }
     }
 
+    // Holds the recording gate for the whole run, so the orphan sweep never
+    // sees the segments before their index exists.
     fun run(): Outcome {
+        VideoItems.recordingGate.lock()
+        try {
+            return runLocked()
+        } finally {
+            VideoItems.recordingGate.unlock()
+        }
+    }
+
+    private fun runLocked(): Outcome {
         val vault = vaults.vault ?: throw IllegalStateException("vault not open")
         val before = LeakScan.run(context)
         val cpu0 = cpuTicks()

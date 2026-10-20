@@ -451,6 +451,21 @@ int pv_video_index_locate(const pv_video_index_header* h, const pv_video_segment
                           const uint32_t* keys, uint64_t time_us, uint32_t* segment_out,
                           uint32_t* key_out, uint64_t* key_time_us_out);
 
+// Item header peek (Phase 3D, docs/PHASE3D_DESIGN.md Section 4.7). Reads the
+// item header of an object by decrypting only its first chunk. That chunk is
+// authenticated by its own tag and bound to the object header, so the header
+// bytes are verified; nothing here says whether the rest of the object is
+// intact, which only a full decrypt tells. The plaintext length is computed
+// first as pv_object_plaintext_size does and the header is checked against
+// it. Codes: PV_OK with *out filled and *plaintext_len_out (may be NULL) set;
+// PV_ERR_NOT_ITEM, PV_ERR_ITEM_MALFORMED, PV_ERR_ITEM_UNSUPPORTED from the
+// header; otherwise the length or decrypt code (PV_ERR_NOT_FOUND,
+// PV_ERR_TRUNCATED, PV_ERR_MALFORMED_HEADER, PV_ERR_MALFORMED_CHUNK,
+// PV_ERR_WRONG_VMK, PV_ERR_AUTH_FAILED, PV_ERR_IO). The chunk buffer is
+// wiped before return on every path.
+int pv_object_item_header(pv_vault* v, const uint8_t* object_id, pv_item_header* out,
+                          uint64_t* plaintext_len_out);
+
 #ifdef __cplusplus
 }
 #endif

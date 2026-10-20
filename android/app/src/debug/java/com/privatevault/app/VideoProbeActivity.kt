@@ -73,6 +73,9 @@ class VideoProbeActivity : Activity(), LockController.Listener {
         val boundaryGapsMs = ArrayList<Long>()
         var transitions = 0
         val seeks = ArrayList<SeekResult>()
+        // Distinct landings the plan found; fewer than asked when the clip
+        // has fewer segments or shorter ones.
+        var seeksPlanned = 0
         val errors = ArrayList<String>()
         var framesRendered = 0
         var droppedFrames = 0
@@ -447,6 +450,7 @@ class VideoProbeActivity : Activity(), LockController.Listener {
         val p = player ?: return
         p.pause()
         seekPlan = planSeeks(idx, seekCount)
+        report.seeksPlanned = seekPlan.size
         nextSeek = 0
         say("video_play: seeking to ${seekPlan.size} positions")
         runNextSeek()

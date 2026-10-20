@@ -11,6 +11,11 @@
     <uses-permission
         android:name="android.permission.ACCESS_NETWORK_STATE"
         tools:node="remove" />
+    <!-- Declared by androidx.media3:media3-exoplayer; the app holds no wake
+         lock (the video surface keeps the screen on while playing). -->
+    <uses-permission
+        android:name="android.permission.WAKE_LOCK"
+        tools:node="remove" />
 
     <application
         android:name=".PvApp"
@@ -41,6 +46,10 @@
 
         <activity
             android:name=".ViewerActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".VideoActivity"
             android:exported="false" />
 
         <activity

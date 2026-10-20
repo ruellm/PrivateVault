@@ -166,6 +166,11 @@ object NativeBridge {
     // The flag pv_vault_decrypt_to_buffer polls; Vault.close sets and clears it.
     external fun nativeSetViewerCancel(cancel: Boolean)
     external fun nativeDeleteObject(handle: Long, id: ByteArray): Int
+    // Phase 3D. The item header from the first chunk of an object, for
+    // classification; the status is the core code, and on OK infoOut holds
+    // [media_type, rotation, width, height, created_unix_ms, payload_len,
+    // header_len, plaintext_len].
+    external fun nativeObjectItemHeader(handle: Long, id: ByteArray, infoOut: LongArray): Int
 
     // Phase 3C video index (docs/PHASE3C_DESIGN.md Section 4.4). The header is a
     // LongArray of 13: [version, header_len, video_codec, rotation, width, height,

@@ -155,6 +155,26 @@ D-013 stays because the debug variant still carries `media3-common`.
 | `androidx.media3:media3-extractor` | 1.11.1 | `debugImplementation` | `FragmentedMp4Extractor` for the key-frame investigation (reads the container the media3 way beside the framework extractor). Brings `media3-decoder` 1.11.1. Debug APK 17.6 to 28.6 MB; release and benchmark unchanged (0 media3 classes). |
 | `androidx.media3:media3-exoplayer` | 1.11.1 | `debugImplementation` (Milestone D) | ExoPlayer for the playback probe (`VideoProbeActivity`, `GuardedSegmentDataSource`). Brings `media3-datasource`, `media3-database`, `media3-container` (resolved tree in `docs/PHASE3C_PROGRESS.md`). Its manifest declares `WAKE_LOCK`; the debug manifest removes it (`tools:node="remove"`), as the main manifest does for `ACCESS_NETWORK_STATE`. Release and benchmark unchanged (0 media3 classes). |
 
+## Phase 3D Android dependencies (2026-10-20)
+
+| Dependency | Version | Configuration | Role |
+|---|---|---|---|
+| `androidx.media3:media3-exoplayer` | 1.11.1 | `implementation` (every variant; was `debugImplementation` in 3C) | ExoPlayer for the video viewer (`VideoActivity`, `GuardedSegmentDataSource`, `SeekableSegmentExtractor`). Resolves `media3-common`, `-container`, `-database`, `-datasource`, `-decoder`, `-extractor` 1.11.1 into release and benchmark. No `media3-ui`. Its `WAKE_LOCK` permission is removed by the main manifest (`tools:node="remove"`), as `ACCESS_NETWORK_STATE` is. No native code. |
+
+Classes defined per APK and sizes (`dexclasses.py`, build of Milestone D):
+
+| APK | media3 classes | `androidx.camera.video` | Size before (3C) | Size after |
+|---|---|---|---|---|
+| debug | 2637 (the muxer is debug-only) | 0 | 20 601 168 | 20 255 736 |
+| benchmark | 2577 | 0 | 10 627 697 | 15 718 163 |
+| release (unsigned) | 2577 | 0 | 10 619 505 | 15 709 971 |
+
+The merged release and benchmark manifests carry `CAMERA` only (plus the AGP-declared
+`DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`), six activities with `LockActivity` the only
+exported one, the disabled CameraX holder service, no receiver, no provider. The video
+thumbnail (`VideoFirstFrame`) and the gallery classification use platform classes only.
+R8 stays off (Phase 6 item, `docs/ROADMAP.md`).
+
 ## Phase 3A Android dependencies (added in Milestone D, 2026-10-14)
 
 Fetched from Google Maven by Gradle and pinned in `android/app/build.gradle.kts`. License

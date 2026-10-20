@@ -504,3 +504,81 @@ reading in the former; the latter is the 3D amount of work the probe should meas
 replace); one concatenated stream across segments (several `moov` boxes in one stream are
 not a valid fragmented MP4); decrypting the whole clip (defeats the segment design and the
 memory bound).
+
+## D-032 media3-exoplayer in every variant, own controls, no media3-ui (2026-10-20, approved at the Phase 3D checkpoint)
+
+Measured in Milestone A: `media3-exoplayer` 1.11.1 declared as `implementation` adds
+5 008 554 bytes and 2577 classes to the release and benchmark APKs, seven media3 artifacts to
+their trees, no native library, and one manifest permission (`WAKE_LOCK`).
+
+Choice: the pinned 1.11.1 the probe measured with, declared for every variant; the
+`WAKE_LOCK` removal moves to the main manifest; the controls (tap, seek bar, times) are
+platform widgets in `VideoActivity`; `media3-ui` is not added. R8 stays a Phase 6 item.
+
+Alternatives: a bare `MediaCodec` loop in place of ExoPlayer (the 3C probe needed its seek
+map, re-basing, and playlist handling, all of which ExoPlayer provides over the data
+source; the own loop would be the larger and less tested piece); `media3-ui` for the
+controls (brings its own views and resources for three widgets the platform has).
+
+## D-033 Gallery classification by an item-header peek, segments hidden by their own header (2026-10-20, approved at the Phase 3D checkpoint)
+
+Choice: a new core call `pv_object_item_header` decrypts only the first chunk of an object
+(authenticated by its tag, bound to the object header) and reads the item header; the
+gallery classifies every object through it, shows one tile per index object, and lists no
+segment object, whether or not an index names it. Every display path still decrypts the
+whole object.
+
+Alternatives: classify through the full viewer load as 3B does (decrypts every segment,
+1 to 2 MB each, to learn it is a segment: several seconds of background work for a vault
+of a few clips); hide segments only once an index names them (segments of a damaged clip
+or an interrupted recording would show as unknown tiles); a persistent object list with
+types (metadata on disk outside the objects, which the design avoids).
+
+## D-034 Video thumbnail from the guarded buffer through MediaCodec, buffer freed once the sample is queued (2026-10-20, approved at the Phase 3D checkpoint)
+
+Measured on the emulator: parse 0 ms, codec start 27 to 92 ms, segment buffer live 39 to
+108 ms, frame wait 0 to 1 ms, conversion 3 to 59 ms, 46 to 170 ms in all; the bitmap is
+256x192, turned to 192x256 by the index rotation, mean luma 98.
+
+Choice: an own parse of the `avcC` and the first sample of the first fragment, the sample
+copied straight into the codec input buffer with start codes, the segment buffer wiped and
+freed before the decode waits, a flexible YUV output sampled into a mutable software
+bitmap. Platform classes only; the same cache and erase rules as photo thumbnails.
+
+Alternatives: `MediaMetadataRetriever` over a `MediaDataSource` (the extraction runs in a
+system process over callbacks that copy the segment into Java arrays); the framework
+`MediaExtractor` over a `MediaDataSource` (same copies, and it reads sync flags the
+framework way, D-028); media3's extractor for the sample (ties the thumbnail to media3
+for no gain over sixty lines of box reading); a surface and `ImageReader` output (the
+brief's alternative, kept as the fallback if the hardware decoder in buffer mode fails on
+the Xiaomi).
+
+## D-035 Delete order index first, orphan sweep after every unlock, skipped while any index is unreadable (2026-10-20, approved at the Phase 3D checkpoint as amended: the sweep works over the object list taken at its start and never runs beside a recording)
+
+Choice: delete the index object, then the segments in index order; after every successful
+unlock the lock thread takes the object list once, peeks every listed object header,
+decodes every index, and deletes the listed segment objects no index names; if any object
+is unreadable (its first chunk fails to decrypt: an index with a damaged first chunk looks
+like any other damaged object, as the Milestone D T2 run showed when the first version
+swept such a clip's segments) or any index fails to decode, the sweep skips and logs. A
+recording gate keeps the sweep and a recording
+apart: the sweep skips when a recording is active, and a recording waits for a running
+sweep. A T2 test starts a recording right after an unlock and checks no segment of it is
+deleted.
+
+Alternatives: segments first then the index (an interruption leaves a gallery entry for a
+clip that no longer plays); a sweep at every gallery open (repeats the work on every open
+and runs on the viewer thread); deleting unnamed segments even when an index is damaged
+(would remove a damaged clip's segments while its tile is still shown).
+
+## D-036 Playback counts as activity for the idle lock; the surface keeps the screen on while playing; no pause timeout (2026-10-20, approved at the Phase 3D checkpoint as amended)
+
+Choice: the viewer's position ticker touches the idle timer while the player is playing;
+paused or ended, the idle lock fires after the timeout as everywhere else. The video
+surface keeps the screen on while playing (`keepScreenOn`, no wake lock and no `WAKE_LOCK`
+permission); the screen-off lock is unchanged. No separate timeout on pause: the guarded segment buffers are closed within the first seconds of
+playback (measured), so a pause holds only the player's sample queue and the codec
+buffers, which the idle, screen-off, and background locks release.
+
+Alternatives: let the idle lock fire mid-play (the brief rules it out); a pause timeout
+shorter than the idle timeout (a second timer for memory the app cannot wipe anyway).

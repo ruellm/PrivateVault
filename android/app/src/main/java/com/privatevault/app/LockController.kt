@@ -178,7 +178,24 @@ class LockController(
             setState(LockState.UNLOCKED)
             touch()
             Log.i(TAG, "lock: unlocked in $lastUnlockMs ms")
+            scheduleSweep()
             return Result.Ok
+        }
+    }
+
+    // Result of the last orphan-segment sweep (tests read and reset it).
+    @Volatile var lastSweep: VideoItems.SweepResult? = null
+
+    // The sweep of docs/PHASE3D_DESIGN.md Section 4.6 runs on the lock thread
+    // right after an unlock of an existing vault; the unlock itself does not
+    // wait for it. A lock queued behind it runs once it is done.
+    private fun scheduleSweep() {
+        lockExecutor.execute {
+            val v = vaults.vault ?: return@execute
+            if (current != LockState.UNLOCKED) return@execute
+            val r = VideoItems.sweep(v)
+            lastSweep = r
+            Log.i(TAG, "sweep: ${r.line()}")
         }
     }
 
@@ -297,6 +314,7 @@ class LockController(
         setState(LockState.UNLOCKED)
         touch()
         Log.i(TAG, "lock: vault migrated to provider 3, ${hmac.lastMode}, strongbox=${hmac.lastStrongBox}")
+        scheduleSweep()
         return Result.Ok
     }
 

@@ -292,6 +292,175 @@ void large(pv_vault* v) {
     CHECK_EQ(pv_vault_delete_object(v, id), PV_OK);
 }
 
+// Phase 3D: the item header peek (pv_object_item_header).
+
+pv_item_header item_header(uint64_t payload_len) {
+    pv_item_header h{};
+    h.item_version = PV_ITEM_VERSION;
+    h.header_len = PV_ITEM_HEADER_BYTES;
+    h.media_type = PV_MEDIA_VIDEO_SEGMENT;
+    h.rotation_degrees = 90;
+    h.width = 1600;
+    h.height = 1200;
+    h.created_unix_ms = 1791849600000ull;
+    h.payload_len = payload_len;
+    return h;
+}
+
+// Encrypts [raw header bytes, payload] as one object of the vault.
+void make_item(pv_vault* v, const uint8_t* raw, size_t raw_len, const ts::Bytes& payload,
+               uint32_t chunk_size, uint8_t* id_out) {
+    const uint8_t* parts[] = {raw, payload.empty() ? nullptr : payload.data()};
+    size_t lens[] = {raw_len, payload.size()};
+    pv_source src{};
+    CHECK_EQ(pv_source_memory_new(parts, lens, 2, &src), PV_OK);
+    CHECK_EQ(pv_vault_encrypt(v, &src, chunk_size, id_out), PV_OK);
+    pv_source_memory_free(&src);
+}
+
+void make_item(pv_vault* v, const pv_item_header& h, const ts::Bytes& payload, uint32_t chunk_size,
+               uint8_t* id_out) {
+    uint8_t raw[PV_ITEM_HEADER_BYTES];
+    size_t n = 0;
+    CHECK_EQ(pv_item_header_encode(&h, raw, sizeof(raw), &n), PV_OK);
+    make_item(v, raw, n, payload, chunk_size, id_out);
+}
+
+void check_header(const pv_item_header& got, const pv_item_header& want) {
+    CHECK_EQ(got.item_version, want.item_version);
+    CHECK_EQ(got.header_len, want.header_len);
+    CHECK_EQ(got.media_type, want.media_type);
+    CHECK_EQ(got.rotation_degrees, want.rotation_degrees);
+    CHECK_EQ(got.width, want.width);
+    CHECK_EQ(got.height, want.height);
+    CHECK_EQ(got.created_unix_ms, want.created_unix_ms);
+    CHECK_EQ(got.payload_len, want.payload_len);
+}
+
+void flip_byte(const std::string& path, size_t offset) {
+    ts::Bytes data = ts::read_file(path);
+    CHECK(offset < data.size());
+    data[offset] ^= 0x01;
+    ts::write_file(path, data);
+}
+
+void cut_file(const std::string& path, size_t length) {
+    ts::Bytes data = ts::read_file(path);
+    CHECK(length <= data.size());
+    data.resize(length);
+    ts::write_file(path, data);
+}
+
+void item_headers(pv_vault* v) {
+    const uint32_t c = PV_DEFAULT_CHUNK_SIZE;
+    uint8_t id[PV_OBJECT_ID_BYTES];
+    pv_item_header got{};
+    uint64_t len = 0;
+
+    // One chunk, three chunks, and a header with no payload.
+    const uint64_t payloads[] = {1000, 2ull * c + 500, 0};
+    for (uint64_t n : payloads) {
+        pv_item_header h = item_header(n);
+        make_item(v, h, ts::det_bytes(n), c, id);
+        len = 0;
+        CHECK_EQ(pv_object_item_header(v, id, &got, &len), PV_OK);
+        check_header(got, h);
+        CHECK_EQ(len, n + PV_ITEM_HEADER_BYTES);
+        CHECK_EQ(pv_object_item_header(v, id, &got, nullptr), PV_OK);
+        CHECK_EQ(pv_vault_delete_object(v, id), PV_OK);
+    }
+
+    // Not an item: deterministic bytes, and an empty object.
+    make_object(v, 5000, c, id);
+    CHECK_EQ(pv_object_item_header(v, id, &got, &len), PV_ERR_NOT_ITEM);
+    CHECK_EQ(pv_vault_delete_object(v, id), PV_OK);
+    make_object(v, 0, c, id);
+    CHECK_EQ(pv_object_item_header(v, id, &got, &len), PV_ERR_NOT_ITEM);
+    CHECK_EQ(pv_vault_delete_object(v, id), PV_OK);
+
+    // Header fields a reader rejects, written by hand: rotation 45, media
+    // type 9, item version 2, and a payload length off by one.
+    {
+        pv_item_header h = item_header(300);
+        uint8_t raw[PV_ITEM_HEADER_BYTES];
+        size_t n = 0;
+        CHECK_EQ(pv_item_header_encode(&h, raw, sizeof(raw), &n), PV_OK);
+        ts::Bytes payload = ts::det_bytes(300);
+        struct Case {
+            size_t offset;
+            uint8_t value;
+            int expect;
+        };
+        const Case cases[] = {
+            {14, 45, PV_ERR_ITEM_MALFORMED},
+            {12, 9, PV_ERR_ITEM_UNSUPPORTED},
+            {8, 2, PV_ERR_ITEM_UNSUPPORTED},
+            {32, static_cast<uint8_t>(300 + 1), PV_ERR_ITEM_MALFORMED},
+        };
+        for (const Case& k : cases) {
+            uint8_t bad[PV_ITEM_HEADER_BYTES];
+            std::memcpy(bad, raw, sizeof(bad));
+            bad[k.offset] = k.value;
+            make_item(v, bad, sizeof(bad), payload, c, id);
+            CHECK_EQ(pv_object_item_header(v, id, &got, &len), k.expect);
+            CHECK_EQ(pv_vault_delete_object(v, id), PV_OK);
+        }
+    }
+
+    // Tampered first chunk: refused. Tampered later chunk: the peek passes
+    // (classification only) while the full decrypt refuses the object.
+    {
+        pv_item_header h = item_header(2ull * c + 500);
+        make_item(v, h, ts::det_bytes(2ull * c + 500), c, id);
+        std::string path = object_file(id);
+        flip_byte(path, PV_HEADER_BYTES + static_cast<size_t>(c) + 17 + 10);
+        CHECK_EQ(pv_object_item_header(v, id, &got, &len), PV_OK);
+        check_header(got, h);
+        uint64_t verified = 0;
+        CHECK_EQ(pv_vault_verify(v, id, &verified), PV_ERR_AUTH_FAILED);
+        flip_byte(path, PV_HEADER_BYTES + 10);
+        CHECK_EQ(pv_object_item_header(v, id, &got, &len), PV_ERR_AUTH_FAILED);
+        CHECK_EQ(pv_vault_delete_object(v, id), PV_OK);
+    }
+
+    // Cut files: below one chunk of overhead is truncated; inside the first
+    // chunk the length check passes with a shorter final chunk that then
+    // fails authentication; cut right after a full chunk there is no room
+    // for a final chunk and the length check refuses before any decrypt.
+    {
+        pv_item_header h = item_header(2ull * c + 500);
+        make_item(v, h, ts::det_bytes(2ull * c + 500), c, id);
+        std::string path = object_file(id);
+        ts::Bytes whole = ts::read_file(path);
+        cut_file(path, PV_HEADER_BYTES + static_cast<size_t>(c) + 17);
+        CHECK_EQ(pv_object_item_header(v, id, &got, &len), PV_ERR_MALFORMED_CHUNK);
+        ts::write_file(path, whole);
+        cut_file(path, PV_HEADER_BYTES + 1000);
+        CHECK_EQ(pv_object_item_header(v, id, &got, &len), PV_ERR_AUTH_FAILED);
+        ts::write_file(path, whole);
+        cut_file(path, PV_HEADER_BYTES + 10);
+        CHECK_EQ(pv_object_item_header(v, id, &got, &len), PV_ERR_TRUNCATED);
+        ts::write_file(path, whole);
+        CHECK_EQ(pv_vault_delete_object(v, id), PV_OK);
+    }
+
+    // Wrong key, missing object, arguments.
+    {
+        pv_item_header h = item_header(1000);
+        make_item(v, h, ts::det_bytes(1000), c, id);
+        pv_vault* other = nullptr;
+        ts::Bytes k = ts::other_vmk();
+        CHECK_EQ(pv_vault_open(kVault.c_str(), k.data(), k.size(), &other), PV_OK);
+        CHECK_EQ(pv_object_item_header(other, id, &got, &len), PV_ERR_WRONG_VMK);
+        pv_vault_close(other);
+        CHECK_EQ(pv_object_item_header(nullptr, id, &got, &len), PV_ERR_INVALID_ARGUMENT);
+        CHECK_EQ(pv_object_item_header(v, nullptr, &got, &len), PV_ERR_INVALID_ARGUMENT);
+        CHECK_EQ(pv_object_item_header(v, id, nullptr, &len), PV_ERR_INVALID_ARGUMENT);
+        CHECK_EQ(pv_vault_delete_object(v, id), PV_OK);
+        CHECK_EQ(pv_object_item_header(v, id, &got, &len), PV_ERR_NOT_FOUND);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -305,6 +474,7 @@ int main() {
     guarded_memory();
     delete_objects(v);
     arguments(v);
+    item_headers(v);
     large(v);
     pv_vault_close(v);
     ts::remove_tree(kVault);

@@ -17,8 +17,8 @@ android {
         applicationId = "com.privatevault.app"
         minSdk = 28
         targetSdk = 35
-        versionCode = 5
-        versionName = "0.5.0"
+        versionCode = 6
+        versionName = "0.6.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
@@ -114,12 +114,14 @@ dependencies {
     }
     // ComponentActivity is the LifecycleOwner CameraX binds to.
     implementation("androidx.activity:activity:1.10.1")
-    // Video prototype, debug variant only: the muxer for the recording, the
-    // extractor for the key-frame investigation, ExoPlayer for the Stage 3C
-    // playback probe (docs/PHASE3C_DESIGN.md Section 5).
+    // ExoPlayer for the video viewer (docs/PHASE3D_DESIGN.md Section 3). It
+    // brings media3-extractor, -decoder, -datasource, -database, -container,
+    // and -common; its WAKE_LOCK permission is removed in the manifest.
+    implementation("androidx.media3:media3-exoplayer:1.11.1")
+    // Video prototype, debug variant only: the muxer for the recording and
+    // the extractor declared for the key-frame investigation.
     debugImplementation("androidx.media3:media3-muxer:1.11.1")
     debugImplementation("androidx.media3:media3-extractor:1.11.1")
-    debugImplementation("androidx.media3:media3-exoplayer:1.11.1")
 
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:core:1.6.1")

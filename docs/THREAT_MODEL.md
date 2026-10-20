@@ -274,3 +274,44 @@ playback probe exists in the debug variant only. Design: `docs/PHASE3C_DESIGN.md
   the developer's agreement.
 - Nothing here has been independently reviewed; media3 is an external library processing
   plaintext in the debug build.
+
+## 10. Phase 3D additions: video playback in the viewer (approved 2026-10-20 at the Milestone B checkpoint, confirmed at Milestone E on both devices)
+
+What Stage 3D claims, and only this: **a clip plays from its encrypted segments through a
+player library over memory the app controls and wipes one segment at a time, its thumbnail
+is decoded from the first segment into a bitmap the app erases, nothing of a clip is written
+to storage, and a lock releases the player, the codec, and every app-owned buffer.** What
+the player library and the codec hold between extraction and display is listed, not
+claimed. Design: `docs/PHASE3D_DESIGN.md`.
+
+### 10.1 New assets
+
+| Asset | Where it lives | Lifetime |
+|---|---|---|
+| Extracted samples of the read-ahead | ExoPlayer sample queue (Java heap), in every variant now | Until played or the player is released; collected, not wiped |
+| First-segment sample for the thumbnail | Codec input buffer (platform) | Until the codec consumes it |
+| Thumbnail frame | Codec YUV output (platform) and a 256 px software bitmap (app) | The output until released inside the conversion; the bitmap until the gallery stops, the vault locks, or the cache evicts; erased |
+| Header-peek chunk | One 64 KiB buffer in the core per classification | One call; wiped |
+| Orphan segments | Objects on disk after an interrupted delete | Until the next unlock's sweep |
+
+### 10.2 Threats and the Stage 3D position
+
+| # | Threat | Position |
+|---|---|---|
+| T38 | A media library processes plaintext in release | media3 1.11.1 `exoplayer` and what it brings, pinned, no `media3-ui`; its manifest permission removed; its sample queue is the one plaintext copy the app does not wipe (10.1); nothing independently reviewed. |
+| T39 | Playback keeps the vault unlocked | A playing clip counts as activity for the idle lock; paused or ended does not; the screen-off and background locks are unchanged. A phone left playing stays unlocked until the clip ends plus the idle timeout. |
+| T40 | Thumbnail or player output from unverified data | Every segment and the index are decrypted whole and used only after their final chunk verified; the header peek is classification only and never shows content; a segment that fails to authenticate stops playback with no frame from it. |
+| T41 | Lock during the thumbnail decode | The segment decrypt is cancelled through the 3B flag; a codec decode in flight ends within its bound and the bitmap is erased because the gallery is stopped. |
+| T42 | An interrupted delete leaves content | Orphan segments stay on disk, hidden in the gallery, until the sweep after the next unlock removes them; the ciphertext blocks persist on flash as in T31. |
+| T43 | The index rotation is applied in software | The codec renders the rotation on the secure surface; no app-side frame copy is made for it. |
+
+### 10.3 Residual risks
+
+- The sample queue, codec buffers, surface buffers, and compositor (10.1, T38) are outside
+  the app on every device; `FLAG_SECURE` and the secure surface keep frames out of captures
+  and recents on both devices tested.
+- The read-ahead of a short clip is the whole clip in the Java heap; on a 30 s clip the
+  emulator held about 20 s of samples (Milestone D measurement, `docs/PHASE3D_DESIGN.md`
+  Section 4.3), more than the load control's 4 s; the bound is measured, not set by the
+  app, and a guarded segment buffer can stay live while the loader pauses.
+- A damaged index keeps its segments on disk until the user deletes the damaged tile.

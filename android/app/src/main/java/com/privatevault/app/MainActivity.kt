@@ -156,6 +156,10 @@ class MainActivity : Activity(), LockController.Listener {
                 name == "gc" -> { { forceGc() } }
                 // Phase 3C: the playback probe, debug variant only.
                 name.startsWith("video_play=") -> { { openPlayback(name.substringAfter('=')) } }
+                // Phase 3D: the video viewer, delete of a clip, and the sweep.
+                name.startsWith("video_open=") -> { { openVideo(name.substringAfter('=')) } }
+                name.startsWith("delete_video=") -> { { deleteVideo(name.substringAfter('=')) } }
+                name == "sweep" -> { { say("sweep: ${VideoItems.sweep(requireVault()).line()}") } }
                 else -> { { say("unknown action $name") } }
             }
             run(name, action)
@@ -244,6 +248,42 @@ class MainActivity : Activity(), LockController.Listener {
 
     private fun forceGc() {
         say(HeapActions.gcLine())
+    }
+
+    // The newest object that decodes as an index, or null.
+    private fun latestIndex(v: Vault): String? {
+        for (e in v.listObjects()) {
+            if (e.size > VideoIndex.OBJECT_CAP + 4096) continue
+            val d = VideoIndex.read(v, e.id)
+            if (d.status == NativeBridge.OK && d.index != null) return e.hex
+        }
+        return null
+    }
+
+    // video_open=<index hex | latest>[:seeks=<n>]
+    private fun openVideo(arg: String) {
+        val parts = arg.split(':', limit = 2)
+        val hex = if (parts[0] == "latest") latestIndex(requireVault()) else parts[0]
+        if (hex == null || hex.length != 32) {
+            say("video_open: no index")
+            return
+        }
+        say("video_open: $hex")
+        val i = Intent(this, VideoActivity::class.java).putExtra(VideoActivity.EXTRA_ID, hex)
+        if (parts.size > 1) i.putExtra(VideoActivity.EXTRA_SCRIPT, parts[1])
+        main.post { startActivity(i) }
+    }
+
+    private fun deleteVideo(hex: String) {
+        if (hex.length != 32) {
+            say("delete_video: bad id")
+            return
+        }
+        val v = requireVault()
+        val id = NativeBridge.fromHex(hex)
+        val d = VideoIndex.read(v, id)
+        val r = VideoItems.delete(v, id, d.index)
+        say("delete_video $hex: ${r.line()}")
     }
 
     private fun openPlayback(arg: String) {

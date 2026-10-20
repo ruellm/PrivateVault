@@ -194,6 +194,27 @@ class Vault private constructor(val dir: File, private var handle: Long) {
         return ViewerLoad(rc, info[0].toInt(), item, info[8], out[0])
     }
 
+    // The item header of an object read from its first chunk, for telling
+    // tiles apart without decrypting the whole object. status is the core
+    // code: OK with item set, NOT_ITEM or ITEM_* for a plaintext without a
+    // usable header, otherwise the length or decrypt code. Nothing here says
+    // the rest of the object is intact; a closed vault reads as cancelled.
+    class ItemPeek(val status: Int, val item: ItemInfo?, val plaintextLen: Long)
+
+    fun itemHeader(id: ByteArray): ItemPeek {
+        val info = LongArray(8)
+        val rc = try {
+            withHandle("item header") { h -> NativeBridge.nativeObjectItemHeader(h, id, info) }
+        } catch (e: CoreException) {
+            if (!isOpen) NativeBridge.ERR_CANCELLED else e.code
+        }
+        if (rc != NativeBridge.OK) return ItemPeek(rc, null, 0)
+        return ItemPeek(
+            rc, ItemInfo(info[0].toInt(), info[1].toInt(), info[2].toInt(), info[3].toInt(), info[4], info[5], info[6].toInt()),
+            info[7]
+        )
+    }
+
     // Removes one object and its stale partial. Returns the status.
     fun deleteObject(id: ByteArray): Int = try {
         withHandle("delete") { h -> NativeBridge.nativeDeleteObject(h, id) }

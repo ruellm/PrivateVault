@@ -25,16 +25,17 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
 
-// Debug-only playback probe pieces (docs/PHASE3C_DESIGN.md Section 5.1).
-// A media3 DataSource that serves one segment object of an index from the
-// guarded buffer of a viewer load, a seek map built from the segment's own
-// fragment table so the player can land on a key frame inside a segment,
-// and an extractor wrapper that hands that seek map to the player in place
-// of the unseekable one FragmentedMp4Extractor reports for a stream without
-// a sidx box.
+// The player side of a clip (docs/PHASE3C_DESIGN.md Section 5.1, moved into
+// the viewer by Stage 3D). A media3 DataSource that serves one segment
+// object of an index from the guarded buffer of a viewer load, a seek map
+// built from the segment's own fragment table so the player can land on a
+// key frame inside a segment, and an extractor wrapper that hands that seek
+// map to the player in place of the unseekable one FragmentedMp4Extractor
+// reports for a stream without a sidx box and sets the rotation the index
+// records, since the container carries none.
 
 // The guarded buffers open at this moment, their byte total, and the peak,
-// shared by every data source of one player. Tests and the probe read it.
+// shared by every data source of one player. Tests and the logs read it.
 class LiveBuffers(private val say: (String) -> Unit) {
     private val open = HashMap<Int, Int>()
     @Volatile var peakBytes = 0L
@@ -103,6 +104,14 @@ class GuardedSegmentDataSource(
             require(uri.scheme == SCHEME && uri.host == "segment") { "not a segment uri" }
             return uri.lastPathSegment!!.toInt()
         }
+
+        // Test hook: reads of this segment fail with an IOException, which
+        // takes the player's error path.
+        class TestHooks {
+            @Volatile var failReadSegment = -1
+        }
+
+        val testHooks = TestHooks()
     }
 
     class Factory(
@@ -162,6 +171,7 @@ class GuardedSegmentDataSource(
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         if (length == 0) return 0
         if (remaining <= 0L) return C.RESULT_END_OF_INPUT
+        if (segment == testHooks.failReadSegment) throw IOException("test hook: read of segment $segment")
         val p = payload ?: return C.RESULT_END_OF_INPUT
         val n = minOf(length.toLong(), remaining).toInt()
         p.get(buffer, offset, n)
@@ -322,14 +332,17 @@ object SegmentSeekMap {
 // the unseekable one it reports, so seeks inside a segment start the read at
 // the fragment holding the key frame. After a seek to a fragment offset the
 // extractor, finding no tfdt, numbers that fragment's samples from zero;
-// the wrapper adds the fragment's start time back to every sample time.
+// the wrapper adds the fragment's start time back to every sample time. The
+// rotation the index records goes onto the track format, since the muxer
+// wrote none into the container; the codec then renders the frame upright.
 @androidx.annotation.OptIn(UnstableApi::class)
-class SeekableSegmentExtractor(private val seekMap: ChunkIndex?) : Extractor {
+class SeekableSegmentExtractor(private val seekMap: ChunkIndex?, private val rotation: Int = 0) : Extractor {
     private val inner = FragmentedMp4Extractor(SubtitleParser.Factory.UNSUPPORTED, 0)
     @Volatile private var timeOffsetUs = 0L
 
     private inner class ShiftedTrack(private val out: TrackOutput) : TrackOutput {
-        override fun format(format: Format) = out.format(format)
+        override fun format(format: Format) =
+            out.format(if (rotation != 0) format.buildUpon().setRotationDegrees(rotation).build() else format)
         override fun sampleData(input: DataReader, length: Int, allowEndOfInput: Boolean, sampleDataPart: Int): Int =
             out.sampleData(input, length, allowEndOfInput, sampleDataPart)
         override fun sampleData(data: ParsableByteArray, length: Int, sampleDataPart: Int) =
@@ -362,8 +375,8 @@ class SeekableSegmentExtractor(private val seekMap: ChunkIndex?) : Extractor {
 
     override fun release() = inner.release()
 
-    class Factory(private val seekMaps: ConcurrentHashMap<Int, ChunkIndex>) : ExtractorsFactory {
-        override fun createExtractors(): Array<Extractor> = arrayOf(SeekableSegmentExtractor(null))
+    class Factory(private val seekMaps: ConcurrentHashMap<Int, ChunkIndex>, private val rotation: Int = 0) : ExtractorsFactory {
+        override fun createExtractors(): Array<Extractor> = arrayOf(SeekableSegmentExtractor(null, rotation))
 
         override fun createExtractors(uri: Uri, responseHeaders: Map<String, List<String>>): Array<Extractor> {
             val map = try {
@@ -371,7 +384,7 @@ class SeekableSegmentExtractor(private val seekMap: ChunkIndex?) : Extractor {
             } catch (e: IllegalArgumentException) {
                 null
             }
-            return arrayOf(SeekableSegmentExtractor(map))
+            return arrayOf(SeekableSegmentExtractor(map, rotation))
         }
     }
 }

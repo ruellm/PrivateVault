@@ -126,6 +126,73 @@ int decrypt_to_buffer(pv_vault* v, const uint8_t* object_id, uint8_t* buf, uint6
     return PV_OK;
 }
 
+// Sink that keeps the first bytes it receives and refuses everything,
+// which stops the decrypt after the first chunk. The decrypt loop reports
+// the refusal as PV_ERR_IO; item_header_of maps that back once it sees
+// that the first write arrived.
+struct PeekSink {
+    uint8_t* buf;
+    size_t cap;
+    size_t got;
+    bool done;
+};
+
+int peek_write(void* ctx, const uint8_t* p, size_t n) {
+    PeekSink* s = static_cast<PeekSink*>(ctx);
+    if (!s->done) {
+        size_t take = n < s->cap ? n : s->cap;
+        std::memcpy(s->buf, p, take);
+        s->got = take;
+        s->done = true;
+    }
+    return -1;
+}
+
+int item_header_of(pv_vault* v, const uint8_t* object_id, pv_item_header* out,
+                   uint64_t* plaintext_len_out) {
+    std::string path = object_path(v, object_id);
+    uint64_t expect = 0;
+    int rc = plaintext_size_of_file(path, object_id, &expect);
+    if (rc != PV_OK) {
+        return rc;
+    }
+    pv_source src{};
+    rc = pv_file_source_open(path.c_str(), &src);
+    if (rc != PV_OK) {
+        return rc;
+    }
+    WipedBuffer head(PV_ITEM_HEADER_MAX_BYTES);
+    PeekSink state{head.data(), head.size(), 0, false};
+    pv_sink sink{&state, peek_write};
+    uint64_t len = 0;
+    rc = object_decrypt(v->vmk, &src, &sink, object_id, &len);
+    pv_file_source_close(&src);
+    if (rc == PV_ERR_IO && state.done) {
+        rc = PV_OK;
+    }
+    if (rc != PV_OK) {
+        return rc;
+    }
+    if (!state.done) {
+        // No byte was written: an empty object.
+        return PV_ERR_NOT_ITEM;
+    }
+    pv_item_header h{};
+    rc = pv_item_header_decode(head.data(), state.got, &h);
+    if (rc != PV_OK) {
+        return rc;
+    }
+    rc = pv_item_header_check_len(&h, expect);
+    if (rc != PV_OK) {
+        return rc;
+    }
+    *out = h;
+    if (plaintext_len_out) {
+        *plaintext_len_out = expect;
+    }
+    return PV_OK;
+}
+
 int delete_object(pv_vault* v, const uint8_t* object_id) {
     std::string path = object_path(v, object_id);
     int rc = fs::remove_file(path + ".partial");
@@ -237,6 +304,24 @@ int pv_vault_delete_object(pv_vault* v, const uint8_t* object_id) {
     }
     try {
         return pv::delete_object(v, object_id);
+    } catch (const std::bad_alloc&) {
+        return PV_ERR_OUT_OF_MEMORY;
+    } catch (...) {
+        return PV_ERR_INTERNAL;
+    }
+}
+
+int pv_object_item_header(pv_vault* v, const uint8_t* object_id, pv_item_header* out,
+                          uint64_t* plaintext_len_out) {
+    int rc = pv::ensure_init();
+    if (rc != PV_OK) {
+        return rc;
+    }
+    if (!pv::valid_vault(v) || !object_id || !out) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    try {
+        return pv::item_header_of(v, object_id, out, plaintext_len_out);
     } catch (const std::bad_alloc&) {
         return PV_ERR_OUT_OF_MEMORY;
     } catch (...) {
