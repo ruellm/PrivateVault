@@ -315,3 +315,43 @@ claimed. Design: `docs/PHASE3D_DESIGN.md`.
   Section 4.3), more than the load control's 4 s; the bound is measured, not set by the
   app, and a guarded segment buffer can stay live while the loader pauses.
 - A damaged index keeps its segments on disk until the user deletes the damaged tile.
+
+## 11. Phase 3E additions: video capture (approved 2026-10-21 at the Milestone B checkpoint, confirmed at Milestone E on both devices)
+
+What Stage 3E claims, and only this: **a clip is recorded from the camera into encrypted
+segment objects without any sample or segment passing through the Java heap, the
+segment plaintext lives in guarded native memory the app wipes after encryption, the
+viewfinder is a secure window, and every way a recording ends leaves the segments
+encrypted so far indexed.** What the camera, the GL driver, and the encoder hold is
+listed, not claimed. Design: `docs/PHASE3E_DESIGN.md`.
+
+### 11.1 New assets
+
+| Asset | Where it lives | Lifetime |
+|---|---|---|
+| Camera frames for two outputs | the `SurfaceTexture` image, the viewfinder and encoder surface buffers (platform, vendor, GPU) | per frame |
+| Encoded samples before encryption | one guarded segment buffer in the core (open), up to two more finished and waiting | from the first sample of a segment to the end of its encrypt, about 3 s of video each, 3.6 MB at the chosen settings; wiped |
+| Encoder input and output buffers | platform codec | per frame |
+| Index bytes | a Java array | the encode and encrypt; wiped |
+| Orphan segments after a process kill | objects on disk without an index | until the sweep of the next unlock |
+
+### 11.2 Threats and the Stage 3E position
+
+| # | Threat | Position |
+|---|---|---|
+| T44 | Plaintext media in the Java heap during a recording | none by construction: the encoder output buffer is copied once into the guarded segment buffer by the core; the index is the only Java array and is wiped |
+| T45 | The viewfinder reveals the scene to captures or the recents card | `FLAG_SECURE` on the capture screen as today; the viewfinder output is the `PreviewView` surface inside that window |
+| T46 | A lock during a recording leaves unencrypted samples | the recorder stops within 4 s with the open segment encrypted, or the open buffer wiped past the bound; the index covers what was encrypted |
+| T47 | A process kill mid-recording | segment objects without an index stay on disk encrypted, hidden in the gallery, removed by the sweep after the next unlock; no plaintext is left |
+| T48 | A GL copy of every frame in app code | the splitter reads nothing back; frames go from the camera texture to the two surfaces inside the GPU; the app holds no pixel |
+| T49 | Container metadata in plaintext | rotation and fragment times are inside the encrypted object, as the index is; nothing new on disk |
+
+### 11.3 Residual risks
+
+- Camera, GL, and encoder buffers are outside the app on every device; three outputs
+  (viewfinder, encoder, codec) hold a frame at once instead of one.
+- A busy scene can push a 3 s segment toward the 8 MiB cap; a cap hit stops the
+  recording with the segments so far.
+- The encrypt queue bound of two finished segments means a slow encrypt stops a
+  recording; measured headroom on the phone is 280 to 356 ms per 3.4 MB segment in the
+  debug build.

@@ -40,6 +40,12 @@ object NativeBridge {
     const val ERR_INDEX_MALFORMED = 27
     const val ERR_INDEX_UNSUPPORTED = 28
     const val ERR_NOT_INDEX = 29
+    // Segment writer codes (Phase 3E).
+    const val ERR_SEGMENT_FULL = 30
+    const val ERR_SEGMENT_STATE = 31
+    const val SEGMENT_TIMESCALE = 1_000_000
+    const val SEGMENT_MAX_FRAGMENTS = 64
+    const val SEGMENT_MAX_SAMPLES_PER_FRAGMENT = 1024
 
     const val VMK_BYTES = 32
     const val OBJECT_ID_BYTES = 16
@@ -195,6 +201,27 @@ object NativeBridge {
         header: LongArray, segFields: LongArray, keys: IntArray, timeUs: Long, out: LongArray
     ): Int
 
+    // Phase 3E segment writer (docs/PHASE3E_DESIGN.md Section 4.10). Status
+    // returned; the writer handle is an opaque 64-bit value in handleOut[0].
+    // sps and pps are one NAL unit each, raw or with a start code.
+    external fun nativeSegmentOpen(
+        width: Int, height: Int, rotation: Int, sps: ByteArray, pps: ByteArray, cap: Long, handleOut: LongArray
+    ): Int
+    // Appends an encoder output buffer (a direct ByteBuffer) in place.
+    external fun nativeSegmentAdd(
+        handle: Long, buffer: ByteBuffer, offset: Int, length: Int, ptsUs: Long, key: Boolean
+    ): Int
+    external fun nativeSegmentFinish(handle: Long, endUs: Long): Int
+    // out = [bytes, samples, fragments].
+    external fun nativeSegmentStats(handle: Long, out: LongArray): Int
+    // Encrypts a finished segment as an item from the writer buffer; fields as
+    // nativeEncryptItem takes them (media type 2).
+    external fun nativeSegmentEncrypt(
+        vault: Long, handle: Long, fields: LongArray, idOut: ByteArray, lenOut: LongArray
+    ): Int
+    // Wipes and frees the segment buffer.
+    external fun nativeSegmentClose(handle: Long)
+
     // Phase 2. fields = [media_type, rotation_degrees, width, height, created_unix_ms].
     // Direct buffer: the native side reads the bytes in place.
     external fun nativeEncryptItem(
@@ -232,6 +259,9 @@ object NativeBridge {
     external fun nativeProbeSecureAlloc(size: Long, out: LongArray): Int
     external fun nativeProbeDecryptDirect(handle: Long, id: ByteArray, length: Long, statusOut: IntArray): ByteBuffer?
     external fun nativeProbeFreeDirect(buffer: ByteBuffer)
+    // Debug variant only: a copy of a finished segment (Phase 3E) for the box
+    // checks of the tests; null before finish. The caller wipes the array.
+    external fun nativeSegmentCopy(handle: Long): ByteArray?
     // Debug variant only: viewer loads report the allocation failure code while
     // allocFail is set; each viewer decrypt starts slowMs late.
     external fun nativeSetViewerHooks(allocFail: Boolean, slowMs: Int)

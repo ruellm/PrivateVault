@@ -91,10 +91,14 @@ class GuardedSegmentDataSource(
     private val vault: Vault,
     private val index: VideoIndex,
     private val live: LiveBuffers,
-    private val seekMaps: ConcurrentHashMap<Int, ChunkIndex>
+    private val seekMaps: ConcurrentHashMap<Int, ChunkIndex>,
+    // Per segment, whether its first fragment carries a tfdt (Stage 3E
+    // clips); the extractor factory picks the standard path for those.
+    private val tfdt: ConcurrentHashMap<Int, Boolean> = ConcurrentHashMap()
 ) : BaseDataSource(false) {
 
     companion object {
+        const val TAG = "PrivateVault"
         const val SCHEME = "pv"
         const val SEGMENT_CAP = 32L shl 20
 
@@ -116,9 +120,10 @@ class GuardedSegmentDataSource(
 
     class Factory(
         private val vault: Vault, private val index: VideoIndex, private val live: LiveBuffers,
-        private val seekMaps: ConcurrentHashMap<Int, ChunkIndex>
+        private val seekMaps: ConcurrentHashMap<Int, ChunkIndex>,
+        private val tfdt: ConcurrentHashMap<Int, Boolean> = ConcurrentHashMap()
     ) : DataSource.Factory {
-        override fun createDataSource(): DataSource = GuardedSegmentDataSource(vault, index, live, seekMaps)
+        override fun createDataSource(): DataSource = GuardedSegmentDataSource(vault, index, live, seekMaps, tfdt)
     }
 
     private var current: Uri? = null
@@ -157,6 +162,11 @@ class GuardedSegmentDataSource(
             throw SegmentOpenException(n, NativeBridge.ERR_INVALID_ARGUMENT)
         }
         seekMaps.getOrPut(n) { SegmentSeekMap.build(p, index.segments[n].durationUs) }
+        if (!tfdt.containsKey(n)) {
+            val has = SegmentSeekMap.hasTfdt(p)
+            tfdt[n] = has
+            Log.i(TAG, "video_play: segment $n path=${if (has) "standard" else "wrapper"}")
+        }
         p.position(dataSpec.position.toInt())
         remaining = if (dataSpec.length != C.LENGTH_UNSET.toLong()) minOf(dataSpec.length, p.remaining().toLong()) else p.remaining().toLong()
         load = l
@@ -257,6 +267,13 @@ object SegmentSeekMap {
             if (durations[i] < 0) durations[i] = 0
         }
         return ChunkIndex(sizes, offs, durations, timesUs)
+    }
+
+    // Whether the first moof carries a tfdt (a Stage 3E segment).
+    fun hasTfdt(data: ByteBuffer): Boolean {
+        val b = data.duplicate().order(ByteOrder.BIG_ENDIAN)
+        val moof = findBox(b, b.position(), b.limit(), "moof") ?: return false
+        return findTfdt(b, moof.first, moof.second) != null
     }
 
     // moov/trak/mdia/mdhd timescale.
@@ -375,16 +392,24 @@ class SeekableSegmentExtractor(private val seekMap: ChunkIndex?, private val rot
 
     override fun release() = inner.release()
 
-    class Factory(private val seekMaps: ConcurrentHashMap<Int, ChunkIndex>, private val rotation: Int = 0) : ExtractorsFactory {
+    // A segment whose data source found a tfdt (a Stage 3E clip: sidx, tfdt,
+    // and the rotation in the container) gets the bare extractor; the
+    // others the wrapper with the index rotation (docs/PHASE3E_DESIGN.md
+    // Section 4.5).
+    class Factory(
+        private val seekMaps: ConcurrentHashMap<Int, ChunkIndex>, private val rotation: Int = 0,
+        private val tfdt: ConcurrentHashMap<Int, Boolean> = ConcurrentHashMap()
+    ) : ExtractorsFactory {
         override fun createExtractors(): Array<Extractor> = arrayOf(SeekableSegmentExtractor(null, rotation))
 
         override fun createExtractors(uri: Uri, responseHeaders: Map<String, List<String>>): Array<Extractor> {
-            val map = try {
-                seekMaps[GuardedSegmentDataSource.segmentOf(uri)]
+            val segment = try {
+                GuardedSegmentDataSource.segmentOf(uri)
             } catch (e: IllegalArgumentException) {
-                null
+                -1
             }
-            return arrayOf(SeekableSegmentExtractor(map, rotation))
+            if (tfdt[segment] == true) return arrayOf(FragmentedMp4Extractor(SubtitleParser.Factory.UNSUPPORTED, 0))
+            return arrayOf(SeekableSegmentExtractor(seekMaps[segment], rotation))
         }
     }
 }

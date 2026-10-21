@@ -582,3 +582,112 @@ buffers, which the idle, screen-off, and background locks release.
 
 Alternatives: let the idle lock fire mid-play (the brief rules it out); a pause timeout
 shorter than the idle timeout (a second timer for memory the app cannot wipe anyway).
+
+## D-037 Viewfinder while recording through a CameraEffect splitting one camera stream in OpenGL (2026-10-21, approved at the Phase 3E checkpoint; amended in Milestone E: the encoder draws with the viewfinder matrix and the clip carries rotation 0)
+
+Measured in Milestone A on the Xiaomi 2201116SG: with a public `CameraEffect` (target
+`PREVIEW`) whose `SurfaceProcessor` draws every camera frame to the `PreviewView` surface
+and to the encoder input surface, the camera delivers 30 fps at 1920x1080, every frame
+reaches both outputs, and the encoder keeps 30 fps, the same as the prototype without a
+viewfinder; the cost is about 20 percent of a core and 90 to 120 MiB of PSS in the debug
+build. The emulator (software GL) halves its rate through the split at any size. An own
+`SurfaceTexture` as the Preview output with an own `SurfaceView` drawn in GL gives the
+same numbers.
+
+Choice: the effect route. CameraX supplies the matrix that turns and crops the preview
+output and the `PreviewView` keeps its role. Amended after T3 (Milestone E): the camera
+transform of the device sits inside the texture matrix (a quarter turn on the Xiaomi),
+so an encoder drawn with that matrix and a container turned by the stream rotation played
+sideways; the encoder is now sized to the turned stream and drawn with the same matrix
+CameraX supplies for the viewfinder output, and the index and the container carry
+rotation 0. The own route stays in the trial record as the fallback.
+
+Alternatives: the prototype without a viewfinder (rejected by the brief); the own route
+(works, but the app owns the preview transform and a second view).
+
+## D-038 Segments assembled by an own fragmented MP4 writer in the core inside guarded memory (2026-10-21, approved at the Phase 3E checkpoint with conditions: H.264 now and AAC in 3F, no other codec, only the boxes the design lists; a compatibility gate in T2 and T3 (framework MediaExtractor and media3 parse every new clip, key counts equal to the index); T1 golden vectors for the init segment and one fragment)
+
+Measured: the media3 muxer plus a post-pass (tfdt per fragment, trun and tfhd offsets
+rewritten, sidx after the moov) and an own writer sketch both give segments that play and
+seek through the bare `FragmentedMp4Extractor` with every seek on the chosen key frame
+on both devices; the muxer copies every sample into Java byte buffers before it writes a
+fragment, and the muxer would become a release dependency.
+
+Choice: the writer lives in the core (`segment.cpp`), appends each encoder output buffer
+from its direct `ByteBuffer` into one guarded segment buffer, writes the tkhd rotation,
+tfdt, sidx, true sample durations, and a microsecond timescale, and the segment is
+encrypted from that buffer. No Java array holds a sample or a segment; three segment
+buffers at most. T1 tests the boxes.
+
+Alternatives: the muxer plus post-pass (a release dependency on `media3-muxer`, a Java
+copy of every fragment, a second pass per segment); a push-style object writer (D-014
+stands).
+
+## D-039 Playback chooses the extractor per segment by the presence of tfdt (2026-10-21, approved at the Phase 3E checkpoint; the wrapper behaviour on tfdt clips is traced in Milestone D or pinned by a T2 test as a known limit)
+
+Measured: without a sidx the extractor reports the stream unseekable and every in-segment
+seek lands at the segment start, so the standard path needs the sidx; with tfdt and sidx
+the bare extractor seeks inside a segment and applies the container rotation.
+
+Choice: the data source records whether the first fragment of a segment carries tfdt;
+the extractor factory returns the bare `FragmentedMp4Extractor` for such a segment and
+the 3D wrapper with the index rotation otherwise. The two regression clips keep the
+wrapper path. The wrapper also landed every seek right on a tfdt clip in the trial; the
+mechanism was not traced and is not relied on.
+
+Alternatives: one path for all clips through the wrapper (keeps the re-basing code
+forever); converting the old clips (a rewrite of stored objects, out of scope).
+
+## D-040 Capture settings 1920x1080 asked with fallback, 30 fps target, 8 Mbit/s (2026-10-21, approved at the Phase 3E checkpoint: the Xiaomi decides, the emulator records at its 720p fallback and T2 asserts no frame rate)
+
+Measured on the Xiaomi with the viewfinder live: 30 fps delivered and encoded at
+1920x1080 at 8.0 Mbit/s (segments 3.3 to 3.6 MB) and at 1280x720 at 5.1 Mbit/s (2.0 MB).
+The emulator offers 1280x720 at most and 7 to 11 fps through the split.
+
+Choice: a `ResolutionSelector` asking 1920x1080 (16:9, closest lower then higher), a
+30 to 30 frame-rate range, the encoder configured with the rate the splitter counts
+over its first second, 8 Mbit/s at 1080p and 5 Mbit/s at 720p or below, the 8 MiB
+segment cap, the 3C GOP and segment rules; the index records the delivered rate. The
+phone is the deciding device; the emulator takes the fallback and T2 asserts the
+container and index rules, not a rate.
+
+Alternatives: 1280x720 everywhere (the brief rule read with the emulator as a device
+that must reach 25 fps; it cannot reach it at any size through the split); a size fixed
+per device (no public way to know the encoder budget in advance).
+
+## D-041 One stop path for every end of a recording, the lock bounded by 4 s (2026-10-21, approved at the Phase 3E checkpoint)
+
+Choice: the stop button, every lock trigger, low space at a segment start, an encoder,
+camera, or effect error, an encrypt failure, and a third finished segment all call
+`VideoRecorder.stop(reason)`: no new segment, end of stream signalled, the open segment
+finished where the stream ends and encrypted, the index written over every encrypted
+segment, the gate released. `LockController.lock()` waits up to 4 s for it before the
+capture drain; past the bound the open segment buffer is wiped and the index covers the
+rest. A process kill leaves orphan segments for the sweep (3D rule); no recovery in 3E.
+
+Alternatives: cutting the current segment on a lock without encrypting it (loses up to
+3 s the user saw recorded); an unbounded wait (a slow encrypt would hold the lock).
+
+## D-042 Read-ahead bounded by a byte target of two segments (2026-10-21, approved at the Phase 3E checkpoint)
+
+Measured in 3D: the load control kept about 20 s of a 30 s clip in the sample queue on
+the emulator, more than its 4 s of durations, and held a guarded buffer open while it
+paused.
+
+Choice: `DefaultLoadControl` with a target buffer of twice the largest segment of the
+index (at least 4 MiB) and size before time, so the loader pauses at about two segments
+of samples; measured on a 60 s clip on both devices in Milestone E.
+
+Alternatives: one media source over all segments (changes the playlist shape of 3D);
+a smaller time threshold (the queue is bounded by bytes, not time, when segments are
+whole).
+
+## D-043 Heap investigation with the Rabbit profiler on the Xiaomi debug build (2026-10-21, approved at the Phase 3E checkpoint)
+
+Choice: the 3B procedure (D-027 route a) with the current Android Studio: ten photo
+captures with Java allocation recording, dumps before and after a forced collection under
+`D:\pv-heap`, deleted after reading; a capture change only through a public CameraX
+setting with T2 and the phone captures green; otherwise the threat model records the
+copy.
+
+Alternatives: as D-027.

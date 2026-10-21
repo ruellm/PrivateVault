@@ -13,6 +13,8 @@
 //   make_vectors <output_dir> --video-index  only the video index vectors (Phase 3C:
 //                                        video_index_*.bin, item_video_index.pvo,
 //                                        video_index.txt); everything else is kept
+//   make_vectors <output_dir> --segment  only the segment writer vector (Phase 3E:
+//                                        segment_one_fragment.bin, segment.txt)
 //
 // Manifest columns: name length chunk_size blake2b object_id media_type
 // rotation width height created_unix_ms payload_len. For an item vector the
@@ -361,6 +363,135 @@ int write_video_index_vectors(const std::string& dir) {
     return 0;
 }
 
+// Phase 3E: the segment writer vector (docs/PHASE3E_DESIGN.md Section 4.10).
+// One fragment of three synthetic samples at 1920x1080 with rotation 90; the
+// same inputs are built in test_segment_writer.cpp and the Android golden
+// test, which compare their writer output with the file byte for byte.
+std::vector<uint8_t> det_nozero(size_t n, size_t skip) {
+    std::vector<uint8_t> out(n + skip);
+    pv_source src{};
+    if (pv_source_deterministic_new(seed(), PV_SEED_BYTES, out.size(), &src) != PV_OK) {
+        std::exit(2);
+    }
+    size_t pos = 0;
+    while (pos < out.size()) {
+        size_t got = 0;
+        if (src.read(src.ctx, out.data() + pos, out.size() - pos, &got) != 0 || got == 0) {
+            std::exit(2);
+        }
+        pos += got;
+    }
+    pv_source_deterministic_free(&src);
+    out.erase(out.begin(), out.begin() + static_cast<ptrdiff_t>(skip));
+    for (uint8_t& x : out) {
+        if (x == 0) x = 0x7f;
+    }
+    return out;
+}
+
+std::vector<uint8_t> nal(int code_len, uint8_t header, size_t body, size_t skip) {
+    std::vector<uint8_t> out = code_len == 4 ? std::vector<uint8_t>{0, 0, 0, 1} : std::vector<uint8_t>{0, 0, 1};
+    out.push_back(header);
+    std::vector<uint8_t> b = det_nozero(body, skip);
+    out.insert(out.end(), b.begin(), b.end());
+    return out;
+}
+
+int write_segment_vector(const std::string& dir) {
+    const uint8_t sps[] = {0x67, 0x64, 0x00, 0x28, 0xac, 0xd9, 0x40, 0x78, 0x02, 0x27, 0xe5, 0xc0, 0x44,
+                           0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03, 0x00, 0xf0, 0x3c, 0x60, 0xc6, 0x58};
+    const uint8_t pps[] = {0x68, 0xeb, 0xe3, 0xcb, 0x22, 0xc0};
+    std::vector<uint8_t> s0 = nal(4, 0x65, 299, 0);
+    std::vector<uint8_t> sei = nal(3, 0x06, 19, 300);
+    s0.insert(s0.end(), sei.begin(), sei.end());
+    std::vector<uint8_t> s1 = nal(4, 0x41, 119, 400);
+    std::vector<uint8_t> s2 = nal(3, 0x41, 79, 600);
+    const std::vector<uint8_t>* samples[] = {&s0, &s1, &s2};
+    const uint64_t pts[] = {0, 33333, 66667};
+    const uint64_t end_us = 100000;
+    pv_segment_writer* w = nullptr;
+    int rc = pv_segment_writer_open(1920, 1080, 90, sps, sizeof(sps), pps, sizeof(pps), 1 << 20, &w);
+    if (rc != PV_OK) {
+        std::fprintf(stderr, "segment open: %s\n", pv_error_name(rc));
+        return 2;
+    }
+    for (int i = 0; i < 3; ++i) {
+        rc = pv_segment_writer_add(w, samples[i]->data(), samples[i]->size(), pts[i], i == 0);
+        if (rc != PV_OK) {
+            std::fprintf(stderr, "segment add %d: %s\n", i, pv_error_name(rc));
+            return 2;
+        }
+    }
+    rc = pv_segment_writer_finish(w, end_us);
+    if (rc != PV_OK) {
+        std::fprintf(stderr, "segment finish: %s\n", pv_error_name(rc));
+        return 2;
+    }
+    const uint8_t* data = nullptr;
+    size_t len = 0;
+    pv_segment_writer_data(w, &data, &len);
+    const std::string path = dir + "/segment_one_fragment.bin";
+    pv_file_delete(path.c_str());
+    if (pv_file_write_atomic(path.c_str(), data, len) != PV_OK) {
+        std::fprintf(stderr, "cannot write %s\n", path.c_str());
+        return 2;
+    }
+    // The three samples back to back, so a platform without the
+    // deterministic source in reach can feed the same bytes.
+    std::vector<uint8_t> all;
+    for (int i = 0; i < 3; ++i) {
+        all.insert(all.end(), samples[i]->begin(), samples[i]->end());
+    }
+    const std::string spath = dir + "/segment_samples.bin";
+    pv_file_delete(spath.c_str());
+    if (pv_file_write_atomic(spath.c_str(), all.data(), all.size()) != PV_OK) {
+        std::fprintf(stderr, "cannot write %s\n", spath.c_str());
+        return 2;
+    }
+    // Box offsets: end of moov, end of sidx, moof, mdat, end of file.
+    size_t pos = 0;
+    size_t moov_end = 0, sidx_end = 0, moof = 0, mdat = 0;
+    while (pos + 8 <= len) {
+        uint32_t size = (static_cast<uint32_t>(data[pos]) << 24) | (static_cast<uint32_t>(data[pos + 1]) << 16) |
+                        (static_cast<uint32_t>(data[pos + 2]) << 8) | data[pos + 3];
+        std::string type(reinterpret_cast<const char*>(data + pos + 4), 4);
+        if (type == "moov") moov_end = pos + size;
+        if (type == "sidx") sidx_end = pos + size;
+        if (type == "moof") moof = pos;
+        if (type == "mdat") mdat = pos;
+        pos += size;
+    }
+    uint8_t digest[PV_HASH_BYTES];
+    crypto_generichash(digest, sizeof(digest), data, len, nullptr, 0);
+    std::string text = "# Segment writer vector (Phase 3E). Synthetic values, TEST ONLY.\n"
+                       "# One fragment of three samples, 1920x1080, rotation 90, timescale 1000000.\n"
+                       "# sps and pps: the parameter sets as given (raw NAL units, hex).\n"
+                       "# sample <n> <annex b bytes> <pts_us> <key>: the inputs; bodies are deterministic\n"
+                       "#   bytes with zeros replaced by 0x7f (test_segment_writer.cpp builds the same).\n"
+                       "# offsets <moov_end> <sidx_end> <moof> <mdat> <file_len>\n";
+    text += "sps " + hex(sps, sizeof(sps)) + "\n";
+    text += "pps " + hex(pps, sizeof(pps)) + "\n";
+    for (int i = 0; i < 3; ++i) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "sample %d %zu %llu %d\n", i, samples[i]->size(),
+                      static_cast<unsigned long long>(pts[i]), i == 0 ? 1 : 0);
+        text += buf;
+    }
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "end_us %llu\noffsets %zu %zu %zu %zu %zu\nblake2b %s\n",
+                  static_cast<unsigned long long>(end_us), moov_end, sidx_end, moof, mdat, len,
+                  hex(digest, sizeof(digest)).c_str());
+    text += buf;
+    pv_segment_writer_close(w);
+    const std::string tpath = dir + "/segment.txt";
+    pv_file_delete(tpath.c_str());
+    if (pv_file_write_atomic(tpath.c_str(), reinterpret_cast<const uint8_t*>(text.data()), text.size()) != PV_OK) {
+        return 2;
+    }
+    std::printf("wrote segment_one_fragment.bin (%zu bytes), segment_samples.bin, segment.txt\n", len);
+    return 0;
+}
+
 std::string first_word(const std::string& line) {
     std::istringstream in(line);
     std::string w;
@@ -381,9 +512,10 @@ int field_count(const std::string& line) {
 int main(int argc, char** argv) {
     const bool envelope_only = argc == 3 && std::strcmp(argv[2], "--envelope3") == 0;
     const bool index_only = argc == 3 && std::strcmp(argv[2], "--video-index") == 0;
+    const bool segment_only = argc == 3 && std::strcmp(argv[2], "--segment") == 0;
     if (argc < 2 || argc > 3 ||
-        (argc == 3 && std::strcmp(argv[2], "--items") != 0 && !envelope_only && !index_only)) {
-        std::fprintf(stderr, "usage: make_vectors <output_dir> [--items|--envelope3|--video-index]\n");
+        (argc == 3 && std::strcmp(argv[2], "--items") != 0 && !envelope_only && !index_only && !segment_only)) {
+        std::fprintf(stderr, "usage: make_vectors <output_dir> [--items|--envelope3|--video-index|--segment]\n");
         return 1;
     }
     if (pv_init() != PV_OK) {
@@ -395,6 +527,9 @@ int main(int argc, char** argv) {
     }
     if (index_only) {
         return write_video_index_vectors(dir);
+    }
+    if (segment_only) {
+        return write_segment_vector(dir);
     }
     const bool items_only = argc == 3;
     const uint32_t c = PV_MIN_CHUNK_SIZE;

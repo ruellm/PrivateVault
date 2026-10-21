@@ -3,15 +3,18 @@ package com.privatevault.app
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.Gravity
 import android.view.OrientationEventListener
 import android.view.Surface
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -33,25 +36,33 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 // Capture screen: preview, shutter, status. Each photo goes straight from the
 // CameraX image buffer into an encrypted vault object through CaptureSession.
-// FLAG_SECURE keeps the preview out of screenshots, screen recordings, and the
-// recents thumbnail. Scripted actions (debug use) arrive in the "actions"
-// extra and run once the camera is bound.
+// Video mode (docs/PHASE3E_DESIGN.md Section 4.1) records through the
+// process-scoped VideoRecorder with the preview kept live; the shutter
+// becomes Record and Stop, an elapsed label sits over the preview. FLAG_SECURE
+// keeps the preview out of screenshots, screen recordings, and the recents
+// thumbnail. Scripted actions (debug use) arrive in the "actions" extra and
+// run once the camera is bound.
 class CaptureActivity : ComponentActivity(), LockController.Listener {
 
     companion object {
         const val TAG = "PrivateVault"
         const val EXTRA_ACTIONS = "actions"
         private const val PERMISSION_REQUEST = 1
+        private const val TICK_MS = 200L
     }
 
     private val main = Handler(Looper.getMainLooper())
     private lateinit var previewView: PreviewView
+    private lateinit var previewHost: FrameLayout
     private lateinit var shutter: Button
     private lateinit var grant: Button
     private lateinit var flip: Button
+    private lateinit var modeButton: Button
+    private lateinit var elapsedLabel: TextView
     private lateinit var status: TextView
     private lateinit var scroll: ScrollView
     private lateinit var session: CaptureSession
+    private lateinit var recorder: VideoRecorder
     private lateinit var vaults: VaultSession
     private var provider: ProcessCameraProvider? = null
     private var camera: Camera? = null
@@ -64,9 +75,15 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
     private val scriptStarted = AtomicBoolean(false)
     private var pendingActions: List<String> = emptyList()
     private val scriptThread by lazy { java.util.concurrent.Executors.newSingleThreadExecutor() }
+    private val ticker = Runnable { tick() }
 
     private val lock: LockController get() = PvApp.of(this).lock
     private var started = false
+
+    // Video mode: the shutter records; no ImageCapture is bound.
+    var videoMode = false
+        private set
+    val isRecording: Boolean get() = recorder.isRecording
 
     // Routes to the lock screen unless the vault is unlocked. Returns true
     // when this activity is finishing.
@@ -92,16 +109,31 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
         if (routeIfLocked()) return
         lock.addListener(this)
         session = PvApp.of(this).captureSession
+        recorder = PvApp.of(this).videoRecorder
         vaults = PvApp.of(this).vaultSession
 
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         previewView = PreviewView(this)
-        root.addView(previewView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 2f))
+        previewHost = FrameLayout(this)
+        previewHost.addView(previewView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        elapsedLabel = TextView(this).apply {
+            text = "● 0:00"
+            setTextColor(Color.RED)
+            setBackgroundColor(0x80000000.toInt())
+            setPadding(16, 8, 16, 8)
+            visibility = View.GONE
+        }
+        previewHost.addView(elapsedLabel, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START))
+        root.addView(previewHost, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 2f))
         val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         shutter = Button(this).apply {
             text = "Capture"
             isEnabled = false
-            setOnClickListener { capture { } }
+            setOnClickListener { if (videoMode) toggleRecording() else capture { } }
+        }
+        modeButton = Button(this).apply {
+            text = "Video"
+            setOnClickListener { setVideoMode(!videoMode) }
         }
         val lockButton = Button(this).apply {
             text = "Lock"
@@ -121,6 +153,7 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
             }
         }
         buttons.addView(shutter)
+        buttons.addView(modeButton)
         buttons.addView(flip)
         buttons.addView(lockButton)
         buttons.addView(grant)
@@ -154,12 +187,17 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
         started = true
         if (routeIfLocked()) return
         orientationListener?.enable()
-        if (hasCameraPermission() && provider != null && camera == null) bindCamera()
+        if (recorder.isRecording) {
+            showRecording(true)
+        } else if (hasCameraPermission() && provider != null && camera == null) {
+            bindCamera()
+        }
     }
 
     override fun onStop() {
         started = false
         orientationListener?.disable()
+        main.removeCallbacks(ticker)
         super.onStop()
     }
 
@@ -224,9 +262,13 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
         }, mainExecutor)
     }
 
+    // Photo mode binds the preview and ImageCapture; video mode the preview
+    // only (the recorder rebinds with its effect while recording).
     private fun bindUseCases(p: ProcessCameraProvider) {
+        if (recorder.isRecording) return
         p.unbindAll()
         camera = null
+        imageCapture = null
         cameraReady = false
         val selector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
         if (!p.hasCamera(selector)) {
@@ -238,19 +280,23 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
         }
         val preview = Preview.Builder().build()
         preview.surfaceProvider = previewView.surfaceProvider
-        val capture = ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-            .setResolutionSelector(
-                ResolutionSelector.Builder()
-                    .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
-                    .build()
-            )
-            .setTargetRotation(@Suppress("DEPRECATION") windowManager.defaultDisplay.rotation)
-            .build()
         try {
-            val cam = p.bindToLifecycle(this, selector, preview, capture)
+            val cam = if (videoMode) {
+                p.bindToLifecycle(this, selector, preview)
+            } else {
+                val capture = ImageCapture.Builder()
+                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                    .setResolutionSelector(
+                        ResolutionSelector.Builder()
+                            .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
+                            .build()
+                    )
+                    .setTargetRotation(@Suppress("DEPRECATION") windowManager.defaultDisplay.rotation)
+                    .build()
+                imageCapture = capture
+                p.bindToLifecycle(this, selector, preview, capture)
+            }
             camera = cam
-            imageCapture = capture
             cam.cameraInfo.cameraState.observe(this) { state -> onCameraState(state) }
         } catch (e: Exception) {
             cameraError = "${e.javaClass.simpleName}: ${e.message}"
@@ -267,6 +313,7 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
             say("camera: $cameraError (${state.type})")
             shutter.isEnabled = false
             if (state.type == CameraState.Type.CLOSED) cameraReady = false
+            if (recorder.isRecording) recorder.stop("CAMERA_ERROR")
             maybeRunScript()
             return
         }
@@ -276,12 +323,12 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
                 cameraReady = true
                 shutter.isEnabled = true
                 val res = imageCapture?.resolutionInfo?.resolution
-                say("camera open, facing=${if (lensFacing == CameraSelector.LENS_FACING_BACK) "back" else "front"}, capture resolution=${res?.width}x${res?.height}")
+                say("camera open, facing=${if (lensFacing == CameraSelector.LENS_FACING_BACK) "back" else "front"}, mode=${if (videoMode) "video" else "photo"}, capture resolution=${res?.width}x${res?.height}")
                 maybeRunScript()
             }
             CameraState.Type.CLOSED, CameraState.Type.CLOSING -> {
                 cameraReady = false
-                shutter.isEnabled = false
+                if (!recorder.isRecording) shutter.isEnabled = false
             }
             else -> {}
         }
@@ -304,6 +351,60 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
         ImageCapture.ERROR_FILE_IO -> "ERROR_FILE_IO"
         ImageCapture.ERROR_INVALID_CAMERA -> "ERROR_INVALID_CAMERA"
         else -> "ERROR_UNKNOWN($code)"
+    }
+
+    // Switches between photo and video mode; refused while recording.
+    fun setVideoMode(video: Boolean) {
+        if (recorder.isRecording || video == videoMode) return
+        videoMode = video
+        modeButton.text = if (video) "Photo" else "Video"
+        shutter.text = if (video) "Record" else "Capture"
+        provider?.let { bindUseCases(it) }
+    }
+
+    private fun toggleRecording() {
+        if (recorder.isRecording) recorder.stop("user") else startRecording()
+    }
+
+    // Starts the recorder over this screen's preview. The result line shows
+    // when the recording has ended and the camera is bound again.
+    fun startRecording(): String? {
+        val p = provider ?: return "CAMERA_NOT_READY"
+        if (vaults.vault == null) return "VAULT_CLOSED"
+        if (!videoMode) return "PHOTO_MODE"
+        val refused = recorder.start(p, this, lensFacing, previewView.surfaceProvider) { result ->
+            main.post { onRecordingDone(result) }
+        }
+        if (refused != null) {
+            say("record refused: $refused")
+            return refused
+        }
+        camera = null
+        imageCapture = null
+        showRecording(true)
+        return null
+    }
+
+    private fun showRecording(on: Boolean) {
+        shutter.text = if (on) "Stop" else if (videoMode) "Record" else "Capture"
+        shutter.isEnabled = on || cameraReady
+        flip.isEnabled = !on
+        modeButton.isEnabled = !on
+        elapsedLabel.visibility = if (on) View.VISIBLE else View.GONE
+        main.removeCallbacks(ticker)
+        if (on) main.post(ticker)
+    }
+
+    private fun tick() {
+        if (!recorder.isRecording) return
+        elapsedLabel.text = "● " + VideoItems.durationLabel(recorder.elapsedMs * 1000)
+        main.postDelayed(ticker, TICK_MS)
+    }
+
+    private fun onRecordingDone(result: VideoRecorder.Result) {
+        showRecording(false)
+        if (isFinishing) return
+        if (started && lock.state == LockState.UNLOCKED) provider?.let { bindUseCases(it) }
     }
 
     // Starts one capture. The callback runs when the object is complete or the
@@ -382,6 +483,14 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
                     else say("test hooks are not in this build")
                 }
                 name == "test_hook_clear" -> if (BuildConfig.DEBUG) NativeBridge.nativeSetTestHooks(0, 0)
+                // Stage 3E: a recording of the given length from the feature
+                // path, and a forced stop reason for the next recording.
+                name.startsWith("record=") -> recordAndWait(name.substringAfter('=').toLong())
+                name.startsWith("record_hook=") -> {
+                    val hook = name.substringAfter('=')
+                    if (hook == "SKIP_INDEX") recorder.testHooks.skipIndex = true else recorder.testHooks.stopAt = hook
+                    say("record hook $hook set")
+                }
                 name == "video_probe" || name.startsWith("video_probe=") -> {
                     val runner = VideoProbes.get()
                     if (runner == null) say("$name: not available in this build")
@@ -393,6 +502,35 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
         } catch (e: Exception) {
             say("[$name] FAIL: ${e.javaClass.name}: ${e.message}")
         }
+    }
+
+    // Records for clipMs through the feature path and waits for the result.
+    private fun recordAndWait(clipMs: Long) {
+        val switched = CountDownLatch(1)
+        main.post {
+            setVideoMode(true)
+            switched.countDown()
+        }
+        switched.await(5, TimeUnit.SECONDS)
+        val deadline = System.nanoTime() + 10_000_000_000L
+        while (!cameraReady && cameraError == null && System.nanoTime() < deadline) Thread.sleep(50)
+        val done = CountDownLatch(1)
+        var refused: String? = null
+        main.post {
+            refused = startRecording()
+            if (refused != null) done.countDown()
+        }
+        val t0 = System.nanoTime()
+        while (!recorder.isRecording && refused == null && System.nanoTime() - t0 < 5_000_000_000L) Thread.sleep(20)
+        if (refused != null) {
+            say("record: refused $refused")
+            return
+        }
+        Thread.sleep(clipMs)
+        recorder.stop("script")
+        val t1 = System.nanoTime()
+        while (recorder.isRecording && System.nanoTime() - t1 < 60_000_000_000L) Thread.sleep(50)
+        say("record: scripted ${recorder.lastResult?.line() ?: "no result"}")
     }
 
     // Java heap, native heap, and PSS in KiB, for the memory measurements.

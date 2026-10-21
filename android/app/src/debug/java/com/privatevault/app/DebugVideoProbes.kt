@@ -751,6 +751,7 @@ object SegmentVerify {
             val w = fmt.getInteger(MediaFormat.KEY_WIDTH)
             val h = fmt.getInteger(MediaFormat.KEY_HEIGHT)
             val duration = if (fmt.containsKey(MediaFormat.KEY_DURATION)) fmt.getLong(MediaFormat.KEY_DURATION) else -1
+            val rotation = if (fmt.containsKey(MediaFormat.KEY_ROTATION)) fmt.getInteger(MediaFormat.KEY_ROTATION) else -1
             extractor.selectTrack(0)
             var samples = 0
             var syncs = 0
@@ -820,7 +821,7 @@ object SegmentVerify {
                 decoder.release()
             }
             val spanMs = if (firstUs >= 0) (lastUs - firstUs) / 1000 else -1
-            return "ftyp=$ftyp mime=$mime ${w}x$h duration_ms=${if (duration >= 0) duration / 1000 else "n/a"} samples=$samples sync=$syncs span_ms=$spanMs first_frame_decoded=$decodedFirst (${decodedBytes} bytes) first_frame_mean_luma=$decodedLuma"
+            return "ftyp=$ftyp mime=$mime ${w}x$h rotation=$rotation duration_ms=${if (duration >= 0) duration / 1000 else "n/a"} samples=$samples sync=$syncs span_ms=$spanMs first_frame_decoded=$decodedFirst (${decodedBytes} bytes) first_frame_mean_luma=$decodedLuma"
         } catch (e: Exception) {
             return "ftyp=$ftyp extractor failed: ${e.javaClass.simpleName}: ${e.message}"
         } finally {

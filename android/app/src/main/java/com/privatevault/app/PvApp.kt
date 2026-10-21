@@ -20,6 +20,8 @@ class PvApp : Application() {
         private set
     lateinit var captureSession: CaptureSession
         private set
+    lateinit var videoRecorder: VideoRecorder
+        private set
     lateinit var lock: LockController
         private set
 
@@ -28,7 +30,8 @@ class PvApp : Application() {
         NativeBridge.nativeInit()
         vaultSession = VaultSession(this)
         captureSession = CaptureSession(this, vaultSession)
-        lock = LockController(this, vaultSession, captureSession)
+        videoRecorder = VideoRecorder(this, vaultSession, captureSession)
+        lock = LockController(this, vaultSession, captureSession, videoRecorder)
         lock.start()
         // Lock triggers (docs/PHASE3A_DESIGN.md Section 5): the whole app
         // going to the background, and the screen turning off. Background

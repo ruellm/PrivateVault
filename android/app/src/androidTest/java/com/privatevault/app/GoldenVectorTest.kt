@@ -90,6 +90,62 @@ class GoldenVectorTest {
         dir.deleteRecursively()
     }
 
+    // Phase 3E: the segment writer over the committed inputs gives the
+    // committed bytes (docs/PHASE3E_DESIGN.md Section 4.10).
+    @Test
+    fun segmentWriterVector() {
+        val text = assets.open("segment.txt").bufferedReader().readLines()
+        var sps = ByteArray(0)
+        var pps = ByteArray(0)
+        val sizes = ArrayList<Int>()
+        val pts = ArrayList<Long>()
+        val keys = ArrayList<Boolean>()
+        var endUs = 0L
+        var hashHex = ""
+        for (line in text) {
+            val parts = line.trim().split(Regex("\\s+"))
+            when (parts[0]) {
+                "sps" -> sps = NativeBridge.fromHex(parts[1])
+                "pps" -> pps = NativeBridge.fromHex(parts[1])
+                "sample" -> {
+                    sizes.add(parts[2].toInt())
+                    pts.add(parts[3].toLong())
+                    keys.add(parts[4] == "1")
+                }
+                "end_us" -> endUs = parts[1].toLong()
+                "blake2b" -> hashHex = parts[1]
+            }
+        }
+        assertEquals(3, sizes.size)
+        val samples = assets.open("segment_samples.bin").use { it.readBytes() }
+        assertEquals(sizes.sum(), samples.size)
+        val expected = assets.open("segment_one_fragment.bin").use { it.readBytes() }
+        val handle = LongArray(1)
+        assertEquals(NativeBridge.OK, NativeBridge.nativeSegmentOpen(1920, 1080, 90, sps, pps, 1L shl 20, handle))
+        try {
+            var at = 0
+            for (i in sizes.indices) {
+                val buf = java.nio.ByteBuffer.allocateDirect(sizes[i])
+                buf.put(samples, at, sizes[i])
+                buf.flip()
+                at += sizes[i]
+                assertEquals(NativeBridge.OK, NativeBridge.nativeSegmentAdd(handle[0], buf, 0, sizes[i], pts[i], keys[i]))
+            }
+            assertEquals(NativeBridge.OK, NativeBridge.nativeSegmentFinish(handle[0], endUs))
+            val stats = LongArray(3)
+            assertEquals(NativeBridge.OK, NativeBridge.nativeSegmentStats(handle[0], stats))
+            assertEquals(expected.size.toLong(), stats[0])
+            assertEquals(3L, stats[1])
+            assertEquals(1L, stats[2])
+            val got = NativeBridge.nativeSegmentCopy(handle[0])!!
+            assertTrue(got.contentEquals(expected))
+            got.fill(0)
+        } finally {
+            NativeBridge.nativeSegmentClose(handle[0])
+        }
+        assertTrue(hashHex.isNotEmpty())
+    }
+
     @Test
     fun exportVectorForWindows() {
         val dir = File(context.filesDir, "pv_export").also { it.deleteRecursively(); it.mkdirs() }

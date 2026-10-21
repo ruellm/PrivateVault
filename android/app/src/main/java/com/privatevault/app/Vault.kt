@@ -303,6 +303,16 @@ class Vault private constructor(val dir: File, private var handle: Long) {
         return Stored(id, len[0], path)
     }
 
+    // Encrypts a finished segment straight from the writer buffer (Phase 3E).
+    fun encryptSegment(writer: Long, meta: ItemMeta): Stored {
+        val id = ByteArray(NativeBridge.OBJECT_ID_BYTES)
+        val len = LongArray(1)
+        withHandle("encrypt segment") { h ->
+            check(NativeBridge.nativeSegmentEncrypt(h, writer, meta.fields(), id, len), "encrypt segment")
+        }
+        return Stored(id, len[0], BufferPath.DIRECT)
+    }
+
     fun encryptItemArray(data: ByteArray, offset: Int, length: Int, meta: ItemMeta): Stored {
         val id = ByteArray(NativeBridge.OBJECT_ID_BYTES)
         val len = LongArray(1)

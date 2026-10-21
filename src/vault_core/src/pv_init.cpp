@@ -54,6 +54,8 @@ const char* pv_error_name(int code) {
         case PV_ERR_INDEX_MALFORMED: return "PV_ERR_INDEX_MALFORMED";
         case PV_ERR_INDEX_UNSUPPORTED: return "PV_ERR_INDEX_UNSUPPORTED";
         case PV_ERR_NOT_INDEX: return "PV_ERR_NOT_INDEX";
+        case PV_ERR_SEGMENT_FULL: return "PV_ERR_SEGMENT_FULL";
+        case PV_ERR_SEGMENT_STATE: return "PV_ERR_SEGMENT_STATE";
         default: return "PV_ERR_UNKNOWN";
     }
 }

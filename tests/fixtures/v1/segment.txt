@@ -1,0 +1,14 @@
+# Segment writer vector (Phase 3E). Synthetic values, TEST ONLY.
+# One fragment of three samples, 1920x1080, rotation 90, timescale 1000000.
+# sps and pps: the parameter sets as given (raw NAL units, hex).
+# sample <n> <annex b bytes> <pts_us> <key>: the inputs; bodies are deterministic
+#   bytes with zeros replaced by 0x7f (test_segment_writer.cpp builds the same).
+# offsets <moov_end> <sidx_end> <moof> <mdat> <file_len>
+sps 67640028acd940780227e5c044000003000400000300f03c60c658
+pps 68ebe3cb22c0
+sample 0 327 0 1
+sample 1 124 33333 0
+sample 2 83 66667 0
+end_us 100000
+offsets 667 719 719 843 1387
+blake2b 11c411dfbdc69ed573f98405f06e36c1e5dca9d4361e5df1e8c47aa86bca4e74

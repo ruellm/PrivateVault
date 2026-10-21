@@ -16,7 +16,8 @@ enum class LockState { NO_VAULT, LOCKED, UNLOCKED, LOCKING }
 class LockController(
     private val context: Context,
     private val vaults: VaultSession,
-    private val captures: CaptureSession
+    private val captures: CaptureSession,
+    private val recorder: VideoRecorder? = null
 ) {
     companion object {
         const val TAG = "PrivateVault"
@@ -422,6 +423,14 @@ class LockController(
             main.removeCallbacks(idleRunnable)
             setState(LockState.LOCKING)
             Log.i(TAG, "lock: locking ($reason)")
+            // A recording ends first: its open segment is encrypted and the
+            // index written within the bound, or the open segment is dropped
+            // (docs/PHASE3E_DESIGN.md Section 4.7).
+            if (recorder != null && recorder.isRecording) {
+                val t0 = System.nanoTime()
+                val finished = recorder.stopAndWait("lock", VideoRecorder.STOP_WAIT_MS)
+                Log.i(TAG, "lock: recording ${if (finished) "finished" else "abandoned"} after ${(System.nanoTime() - t0) / 1_000_000} ms")
+            }
             val idle = captures.drain(DRAIN_MS)
             if (!idle) Log.i(TAG, "lock: encrypt still running after ${DRAIN_MS} ms, waiting")
             captures.awaitIdle()

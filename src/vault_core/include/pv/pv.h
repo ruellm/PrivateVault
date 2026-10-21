@@ -53,6 +53,12 @@ extern "C" {
 // The payload does not start with the index magic. A classification result,
 // like PV_ERR_NOT_ITEM.
 #define PV_ERR_NOT_INDEX 29
+// Segment writer codes (Phase 3E). See docs/PHASE3E_DESIGN.md Section 4.10.
+// FULL: the sample, the fragment, or the sidx slot does not fit the buffer.
+// STATE: a call out of order (a sample before the first key frame, a sample
+// or finish after finish, finish with no sample).
+#define PV_ERR_SEGMENT_FULL 30
+#define PV_ERR_SEGMENT_STATE 31
 
 // Sizes fixed by the format. Key sizes equal the libsodium constants; the
 // core checks that at compile time.
@@ -465,6 +471,46 @@ int pv_video_index_locate(const pv_video_index_header* h, const pv_video_segment
 // wiped before return on every path.
 int pv_object_item_header(pv_vault* v, const uint8_t* object_id, pv_item_header* out,
                           uint64_t* plaintext_len_out);
+
+// Segment writer (Phase 3E, docs/PHASE3E_DESIGN.md Section 4.4). Writes one
+// video segment as a fragmented MP4 with a single H.264 track into a guarded
+// buffer: ftyp, moov (tkhd with the rotation matrix, avcC from the parameter
+// sets, trex), sidx, then per fragment moof (mfhd, tfhd with
+// default-base-is-moof, tfdt, trun with duration, size, and flags per sample)
+// and mdat. Times are microseconds (timescale 1 000 000). A fragment starts on
+// every key frame; the last sample of a fragment gets the gap to the next
+// fragment, the last sample of the segment the gap to end_us. Samples arrive
+// in Annex B form and are stored with 4-byte length prefixes. The buffer holds
+// the file image after finish and is wiped on close.
+#define PV_SEGMENT_TIMESCALE 1000000u
+#define PV_SEGMENT_MAX_FRAGMENTS 64u
+#define PV_SEGMENT_MAX_SAMPLES_PER_FRAGMENT 1024u
+
+typedef struct pv_segment_writer pv_segment_writer;
+
+// Starts a segment. sps and pps are one NAL unit each, raw or with a start
+// code; sps needs at least 4 bytes (profile, compatibility, level follow the
+// NAL header). cap is the buffer size; the ftyp and moov are written at once.
+int pv_segment_writer_open(uint32_t width, uint32_t height, uint16_t rotation_degrees,
+                           const uint8_t* sps, size_t sps_len, const uint8_t* pps, size_t pps_len,
+                           size_t cap, pv_segment_writer** out);
+// Appends one encoder output buffer with its time from the segment start.
+// Times must increase. key starts a fragment; the first sample must be a key
+// frame. PV_ERR_SEGMENT_FULL when the sample does not fit, the fragment holds
+// PV_SEGMENT_MAX_SAMPLES_PER_FRAGMENT samples, or the segment holds
+// PV_SEGMENT_MAX_FRAGMENTS fragments; the writer stays usable for finish.
+int pv_segment_writer_add(pv_segment_writer* w, const uint8_t* sample, size_t len,
+                          uint64_t pts_us, int key);
+// Closes the open fragment with end_us (above the last sample time) as the end
+// of its last sample, writes the sidx, and leaves the file image in the buffer.
+int pv_segment_writer_finish(pv_segment_writer* w, uint64_t end_us);
+// The file image after finish. The writer keeps ownership.
+int pv_segment_writer_data(const pv_segment_writer* w, const uint8_t** data_out, size_t* len_out);
+// Bytes in the buffer so far, samples added, fragments (the open one counted).
+int pv_segment_writer_stats(const pv_segment_writer* w, size_t* bytes_out, uint32_t* samples_out,
+                            uint32_t* fragments_out);
+// Wipes and frees the buffer and the writer. NULL is ignored.
+void pv_segment_writer_close(pv_segment_writer* w);
 
 #ifdef __cplusplus
 }

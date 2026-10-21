@@ -36,7 +36,7 @@ class MainActivity : Activity(), LockController.Listener {
 
     // Actions that need the capture screen; the rest of the list goes with them.
     private val captureActions = setOf(
-        "capture_photo", "video_probe", "flip", "memory", "test_hook_slow", "test_hook_clear", "wait"
+        "capture_photo", "video_probe", "record", "record_hook", "flip", "memory", "test_hook_slow", "test_hook_clear", "wait"
     )
 
     private fun routeIfLocked(): Boolean {

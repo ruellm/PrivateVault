@@ -1367,6 +1367,120 @@ Java_com_privatevault_app_NativeBridge_nativeDecryptFileItem(JNIEnv* env, jclass
     return rc;
 }
 
+// Phase 3E segment writer (docs/PHASE3E_DESIGN.md Section 4.10). The handle
+// is the writer pointer as a 64-bit value, opaque as the vault handle is.
+
+pv_segment_writer* handle_to_writer(jlong h) {
+    return reinterpret_cast<pv_segment_writer*>(static_cast<intptr_t>(h));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeSegmentOpen(JNIEnv* env, jclass, jint width, jint height,
+                                                         jint rotation, jbyteArray sps, jbyteArray pps,
+                                                         jlong cap, jlongArray handle_out) {
+    std::vector<uint8_t> s;
+    std::vector<uint8_t> p;
+    if (width <= 0 || height <= 0 || rotation < 0 || rotation > 0xffff || cap <= 0 || !handle_out ||
+        env->GetArrayLength(handle_out) < 1 || !copy_bytes(env, sps, 0, s) || !copy_bytes(env, pps, 0, p)) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    pv_segment_writer* w = nullptr;
+    int rc = pv_segment_writer_open(static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+                                    static_cast<uint16_t>(rotation), s.data(), s.size(), p.data(), p.size(),
+                                    static_cast<size_t>(cap), &w);
+    jlong h = rc == PV_OK ? static_cast<jlong>(reinterpret_cast<intptr_t>(w)) : 0;
+    env->SetLongArrayRegion(handle_out, 0, 1, &h);
+    return rc;
+}
+
+// Appends length bytes at buffer[offset] of a direct ByteBuffer (the encoder
+// output buffer); the core copies them into the segment buffer in place.
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeSegmentAdd(JNIEnv* env, jclass, jlong handle, jobject buffer,
+                                                        jint offset, jint length, jlong pts_us, jboolean key) {
+    if (!handle || !buffer || offset < 0 || length <= 0 || pts_us < 0) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    void* base = env->GetDirectBufferAddress(buffer);
+    jlong cap = env->GetDirectBufferCapacity(buffer);
+    if (!base || cap < 0 || static_cast<jlong>(offset) + length > cap) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    return pv_segment_writer_add(handle_to_writer(handle), static_cast<const uint8_t*>(base) + offset,
+                                 static_cast<size_t>(length), static_cast<uint64_t>(pts_us), key ? 1 : 0);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeSegmentFinish(JNIEnv*, jclass, jlong handle, jlong end_us) {
+    if (!handle || end_us < 0) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    return pv_segment_writer_finish(handle_to_writer(handle), static_cast<uint64_t>(end_us));
+}
+
+// out = [bytes, samples, fragments].
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeSegmentStats(JNIEnv* env, jclass, jlong handle, jlongArray out) {
+    if (!handle || !out || env->GetArrayLength(out) < 3) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    size_t bytes = 0;
+    uint32_t samples = 0;
+    uint32_t fragments = 0;
+    int rc = pv_segment_writer_stats(handle_to_writer(handle), &bytes, &samples, &fragments);
+    if (rc == PV_OK) {
+        jlong v[3] = {static_cast<jlong>(bytes), samples, fragments};
+        env->SetLongArrayRegion(out, 0, 3, v);
+    }
+    return rc;
+}
+
+// Encrypts a finished segment as an item (fields as nativeEncryptItem takes
+// them) straight from the writer buffer, through the same cancel hook.
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeSegmentEncrypt(JNIEnv* env, jclass, jlong vault, jlong handle,
+                                                            jlongArray fields, jbyteArray id_out,
+                                                            jlongArray len_out) {
+    if (!vault || !handle) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    const uint8_t* data = nullptr;
+    size_t len = 0;
+    int rc = pv_segment_writer_data(handle_to_writer(handle), &data, &len);
+    if (rc != PV_OK) {
+        return rc;
+    }
+    return encrypt_item(env, vault, data, len, fields, id_out, len_out);
+}
+
+JNIEXPORT void JNICALL
+Java_com_privatevault_app_NativeBridge_nativeSegmentClose(JNIEnv*, jclass, jlong handle) {
+    if (handle) {
+        pv_segment_writer_close(handle_to_writer(handle));
+    }
+}
+
+#ifdef PV_DEBUG_HOOKS
+// Debug variant only: a copy of the finished segment for the box checks of
+// the tests. Returns null before finish; the caller wipes the array.
+JNIEXPORT jbyteArray JNICALL
+Java_com_privatevault_app_NativeBridge_nativeSegmentCopy(JNIEnv* env, jclass, jlong handle) {
+    if (!handle) {
+        return nullptr;
+    }
+    const uint8_t* data = nullptr;
+    size_t len = 0;
+    if (pv_segment_writer_data(handle_to_writer(handle), &data, &len) != PV_OK) {
+        return nullptr;
+    }
+    jbyteArray out = env->NewByteArray(static_cast<jsize>(len));
+    if (out && len > 0) {
+        put_bytes(env, out, data, len);
+    }
+    return out;
+}
+#endif
+
 #ifdef PV_DEBUG_HOOKS
 // Debug variant only. Decrypts the whole plaintext of an object into a new
 // byte array (item header included) so tests can decode it in memory. Returns

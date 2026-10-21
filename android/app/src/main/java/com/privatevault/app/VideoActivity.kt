@@ -55,6 +55,7 @@ class VideoActivity : Activity(), LockController.Listener {
         const val TICK_MS = 200L
         const val SEEK_TIMEOUT_MS = 8000L
         const val CLOSE_WAIT_NS = 2_000_000_000L
+        const val READ_AHEAD_MIN_BYTES = 4L shl 20
     }
 
     class SeekResult(
@@ -113,6 +114,8 @@ class VideoActivity : Activity(), LockController.Listener {
     private var nextSeek = 0
     private var sampler: Sampler? = null
     private val seekMaps = ConcurrentHashMap<Int, ChunkIndex>()
+    // Per opened segment: true when it took the standard path (tests read it).
+    val segmentTfdt = ConcurrentHashMap<Int, Boolean>()
     private val ticker = Runnable { tick() }
 
     val report = Report()
@@ -296,12 +299,19 @@ class VideoActivity : Activity(), LockController.Listener {
 
     private fun buildPlayer(idx: VideoIndex) {
         val v = vaults.vault ?: return
-        val sources = GuardedSegmentDataSource.Factory(v, idx, live, seekMaps)
-        val extractors = SeekableSegmentExtractor.Factory(seekMaps, idx.header.rotation)
+        val sources = GuardedSegmentDataSource.Factory(v, idx, live, seekMaps, segmentTfdt)
+        val extractors = SeekableSegmentExtractor.Factory(seekMaps, idx.header.rotation, segmentTfdt)
+        // The read-ahead stops at about two segments of samples, whichever
+        // of the byte and time thresholds comes first (docs/PHASE3E_DESIGN.md
+        // Section 4.8).
+        val largest = idx.segments.maxOf { it.byteLen }
+        val targetBytes = maxOf(READ_AHEAD_MIN_BYTES, 2 * largest).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(2000, 4000, 500, 1000)
-            .setPrioritizeTimeOverSizeThresholds(true)
+            .setTargetBufferBytes(targetBytes)
+            .setPrioritizeTimeOverSizeThresholds(false)
             .build()
+        Log.i(TAG, "video: read-ahead target_bytes=$targetBytes largest_segment=$largest")
         // The data is local and a failed segment stays failed: no retries,
         // the first failure is the error.
         val noRetry = object : DefaultLoadErrorHandlingPolicy() {
@@ -461,21 +471,25 @@ class VideoActivity : Activity(), LockController.Listener {
     }
 
     // The seek rule: the last key frame at or before the clip time, through
-    // the index; the player decodes forward from it.
-    fun seekToMs(ms: Long) {
+    // the index; the player decodes forward from it. The bar seeks in
+    // milliseconds; the scripted seeks keep microseconds so a segment start
+    // is hit exactly.
+    fun seekToMs(ms: Long) = seekToUs(maxOf(0L, ms) * 1000)
+
+    fun seekToUs(us: Long) {
         val p = player ?: return
         val idx = index ?: return
-        val loc = idx.locate(maxOf(0L, ms) * 1000)
+        val loc = idx.locate(maxOf(0L, us))
         val seg = idx.segments[loc.segment]
         seekFrameUs = -1L
         seekPending = true
         seekNs = System.nanoTime()
-        Log.i(TAG, "video: seek target_ms=$ms segment=${loc.segment} key=${loc.key} key_ms=${loc.keyTimeUs / 1000}")
+        Log.i(TAG, "video: seek target_ms=${us / 1000} segment=${loc.segment} key=${loc.key} key_ms=${loc.keyTimeUs / 1000}")
         p.seekTo(loc.segment, (loc.keyTimeUs - seg.startUs) / 1000)
         currentItem = loc.segment
         elapsed.text = VideoItems.durationLabel(loc.keyTimeUs)
         bar.progress = (loc.keyTimeUs / 1000).toInt()
-        waitSeek(ms * 1000, loc, seg)
+        waitSeek(us, loc, seg)
     }
 
     private fun waitSeek(target: Long, loc: VideoIndex.Location, seg: VideoIndex.Segment) {
@@ -542,7 +556,7 @@ class VideoActivity : Activity(), LockController.Listener {
             return
         }
         val target = seekPlan[nextSeek++]
-        seekToMs(target / 1000)
+        seekToUs(target)
     }
 
     private fun logSummary() {

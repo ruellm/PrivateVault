@@ -20,10 +20,17 @@ object Mp4Boxes {
         val truns = ArrayList<Trun>()
         var mdatBytes = 0L
         var error: String? = null
+        // Stage 3E: the tfdt of each traf (null when absent), the sidx
+        // reference count (-1 when absent), and the rotation the tkhd
+        // matrix encodes (-1 when the matrix is none of the four).
+        val tfdts = ArrayList<Long?>()
+        var sidxReferences = -1
+        var tkhdRotation = -1
+        var trafCount = 0
 
         // One line, flag words in hex, counts in decimal.
         fun line(): String {
-            val sb = StringBuilder("boxes: moof=$moofCount mdat_bytes=$mdatBytes trex_default_flags=${hex(trexDefaultFlags)}")
+            val sb = StringBuilder("boxes: moof=$moofCount mdat_bytes=$mdatBytes tkhd_rotation=$tkhdRotation sidx_refs=$sidxReferences tfdt=[${tfdts.joinToString(",") { it?.toString() ?: "-" }}] trex_default_flags=${hex(trexDefaultFlags)}")
             sb.append(" tfhd_default_flags=[").append(tfhdDefaultFlags.joinToString(",") { hex(it) }).append("]")
             sb.append(" trun=[")
             sb.append(truns.joinToString(" ") { t ->
@@ -101,9 +108,41 @@ object Mp4Boxes {
             when (type) {
                 in containers -> {
                     if (type == "moof") s.moofCount++
+                    if (type == "traf") {
+                        s.trafCount++
+                        s.tfdts.add(null)
+                    }
                     walkRange(b, bodyStart, bodyEnd, s, type)
                 }
                 "mdat" -> s.mdatBytes += size - header
+                "tfdt" -> {
+                    b.position(bodyStart)
+                    val version = b.get().toInt() and 0xff
+                    b.position(bodyStart + 4)
+                    val t = if (version == 1) b.long else (b.int.toLong() and 0xffffffffL)
+                    if (s.tfdts.isNotEmpty()) s.tfdts[s.tfdts.size - 1] = t
+                }
+                "sidx" -> {
+                    b.position(bodyStart)
+                    val version = b.get().toInt() and 0xff
+                    b.position(bodyStart + 4 + 4 + 4 + (if (version == 1) 16 else 8) + 2)
+                    s.sidxReferences = b.short.toInt() and 0xffff
+                }
+                "tkhd" -> {
+                    b.position(bodyStart)
+                    val version = b.get().toInt() and 0xff
+                    // After version/flags, times, track_ID, reserved, duration, 8 reserved, 4 shorts.
+                    b.position(bodyStart + 4 + (if (version == 1) 32 else 20) + 8 + 8)
+                    val a = b.int; val bb = b.int; b.int; val c = b.int; val d = b.int
+                    val one = 0x00010000
+                    s.tkhdRotation = when {
+                        a == one && bb == 0 && c == 0 && d == one -> 0
+                        a == 0 && bb == one && c == -one && d == 0 -> 90
+                        a == -one && bb == 0 && c == 0 && d == -one -> 180
+                        a == 0 && bb == -one && c == one && d == 0 -> 270
+                        else -> -1
+                    }
+                }
                 "trex" -> {
                     b.position(bodyStart + 4)   // version and flags
                     b.int; b.int; b.int; b.int  // track_ID, description index, duration, size

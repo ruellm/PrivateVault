@@ -196,3 +196,15 @@ from the manifest, so it never fired (D-020). The trigger counts started activit
 - No TrueCrypt or VeraCrypt code (`docs/CONTAINER_FEASIBILITY.md`).
 - No test framework beyond CTest (`docs/DECISIONS.md` D-002).
 - No networking, analytics, or advertising libraries on Android.
+
+## Phase 3E (2026-10-21)
+
+No new dependency. The capture feature uses CameraX 1.6.2 public API (`CameraEffect`,
+`SurfaceProcessor`, `SurfaceOutput`, `UseCaseGroup`, `ResolutionSelector`,
+`Preview.Builder.setTargetFrameRate`), the platform `MediaCodec`, EGL and OpenGL ES 2
+(`android.opengl`), and the core segment writer (no media3 muxer in any variant; the
+`media3-muxer` 1.11.1 `debugImplementation` stays for the prototype). APK sizes with the
+feature: debug 21 024 156, benchmark 15 816 467, release (unsigned) 15 808 275 bytes;
+media3 classes defined: debug 2637, benchmark and release 2577; `androidx.camera.video` 0.
+Merged release and benchmark manifests unchanged (`CAMERA` only, six activities,
+`LockActivity` the only export).

@@ -24,7 +24,11 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.extractor.ExtractorsFactory
+import androidx.media3.extractor.mp4.FragmentedMp4Extractor
+import androidx.media3.extractor.text.SubtitleParser
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
@@ -102,6 +106,10 @@ class VideoProbeActivity : Activity(), LockController.Listener {
     private var holdMs = 0L
     // secure=0 in the argument leaves the SurfaceView unsecured (the window keeps FLAG_SECURE), for the black-surface comparison on the Xiaomi.
     private var secureSurface = true
+    // plain=1 (Stage 3E trial): the bare FragmentedMp4Extractor with no seek
+    // map and no rotation from the index, so a segment that carries sidx,
+    // tfdt, and the tkhd rotation is read the standard way.
+    private var plainExtractor = false
     private var started = false
     private var prepareNs = 0L
     private var seekNs = 0L
@@ -167,6 +175,7 @@ class VideoProbeActivity : Activity(), LockController.Listener {
                 p.startsWith("seeks=") -> seekCount = p.substringAfter('=').toIntOrNull() ?: 10
                 p.startsWith("hold=") -> holdMs = p.substringAfter('=').toLongOrNull() ?: 0L
                 p.startsWith("secure=") -> secureSurface = p.substringAfter('=') != "0"
+                p.startsWith("plain=") -> plainExtractor = p.substringAfter('=') == "1"
             }
         }
         val root = LinearLayout(this).apply {
@@ -280,7 +289,11 @@ class VideoProbeActivity : Activity(), LockController.Listener {
     private fun buildPlayer(vault: Vault, idx: VideoIndex) {
         index = idx
         val sources = GuardedSegmentDataSource.Factory(vault, idx, live, seekMaps)
-        val extractors = SeekableSegmentExtractor.Factory(seekMaps)
+        val extractors: ExtractorsFactory = if (plainExtractor) {
+            ExtractorsFactory { arrayOf(FragmentedMp4Extractor(SubtitleParser.Factory.UNSUPPORTED, 0)) }
+        } else {
+            SeekableSegmentExtractor.Factory(seekMaps)
+        }
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(2000, 4000, 500, 1000)
             .setPrioritizeTimeOverSizeThresholds(true)
@@ -320,9 +333,14 @@ class VideoProbeActivity : Activity(), LockController.Listener {
                 if (!firstFrameRendered) {
                     firstFrameRendered = true
                     report.firstFrameMs = (System.nanoTime() - prepareNs) / 1_000_000
-                    say("video_play: first frame after ${report.firstFrameMs}ms")
+                    val f = p.videoFormat
+                    say("video_play: first frame after ${report.firstFrameMs}ms format_rotation=${f?.rotationDegrees} ${f?.width}x${f?.height} plain=$plainExtractor")
                     main.postDelayed({ if (player != null) sampleSurface("playing") }, 2000)
                 }
+            }
+
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                say("video_play: size ${videoSize.width}x${videoSize.height} unapplied_rotation=${videoSize.unappliedRotationDegrees}")
             }
 
             override fun onPlayerError(error: PlaybackException) {

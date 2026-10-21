@@ -32,6 +32,14 @@ TEST ONLY. Everything in this directory is synthetic and public. Nothing here is
   of each index, and the object ID and payload hash of the item. Both platforms decode them
   and re-encode to the same bytes.
 
+- `segment_one_fragment.bin`, `segment_samples.bin`, `segment.txt` (Phase 3E): a video segment from the core segment
+  writer (`docs/PHASE3E_DESIGN.md` Section 4.4): one fragment of three synthetic samples at
+  1920x1080 with rotation 90 (`ftyp`, `moov` with the `tkhd` matrix and `avcC`, `sidx`,
+  `moof` with `tfdt` and a `trun` of durations, sizes, and flags, `mdat`). `segment.txt`
+  records the parameter sets, the sample sizes and times, the box offsets, and the BLAKE2b
+  of the file; `segment_samples.bin` holds the three input samples back to back (Annex B).
+  Both platforms feed the samples through the writer and compare byte for byte.
+
 Generated with `make_vectors` (`tests/tools/make_vectors.cpp`). The Phase 1 vectors were
 written once in Phase 1; the item vectors were added in Phase 2 with the `--items` mode,
 which leaves the other files and manifest lines as they are:
@@ -41,6 +49,7 @@ build\windows-x64-tests\tests\core\Debug\make_vectors.exe tests\fixtures\v1     
 build\windows-x64-tests\tests\core\Debug\make_vectors.exe tests\fixtures\v1 --items    # item vectors only
 build\windows-x64-tests\tests\core\Debug\make_vectors.exe tests\fixtures\v1 --envelope3   # envelope vectors only (Phase 3A)
 build\windows-x64-tests\tests\core\Debug\make_vectors.exe tests\fixtures\v1 --video-index   # video index vectors only (Phase 3C)
+build\windows-x64-tests\tests\core\Debug\make_vectors.exe tests\fixtures\v1 --segment   # segment writer vector only (Phase 3E)
 ```
 
 Regenerating produces different bytes (fresh data keys, nonces, and stream headers) for the
