@@ -363,6 +363,8 @@ int write_video_index_vectors(const std::string& dir) {
     return 0;
 }
 
+//   make_vectors <output_dir> --segment-av  only the two-track segment vector (Phase 3F:
+//                                        segment_av_one_fragment.bin, segment_av_audio.bin, segment_av.txt)
 // Phase 3E: the segment writer vector (docs/PHASE3E_DESIGN.md Section 4.10).
 // One fragment of three synthetic samples at 1920x1080 with rotation 90; the
 // same inputs are built in test_segment_writer.cpp and the Android golden
@@ -492,6 +494,144 @@ int write_segment_vector(const std::string& dir) {
     return 0;
 }
 
+// Phase 3F: the two-track segment vector (docs/PHASE3F_DESIGN.md Section
+// 4.7). The video inputs of --segment plus four synthetic AAC frames timed
+// 500 us into the segment; test_segment_writer.cpp and the Android golden
+// test build the same inputs and compare byte for byte.
+int write_segment_av_vector(const std::string& dir) {
+    const uint8_t sps[] = {0x67, 0x64, 0x00, 0x28, 0xac, 0xd9, 0x40, 0x78, 0x02, 0x27, 0xe5, 0xc0, 0x44,
+                           0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03, 0x00, 0xf0, 0x3c, 0x60, 0xc6, 0x58};
+    const uint8_t pps[] = {0x68, 0xeb, 0xe3, 0xcb, 0x22, 0xc0};
+    const uint8_t asc[] = {0x11, 0x90};
+    std::vector<uint8_t> s0 = nal(4, 0x65, 299, 0);
+    std::vector<uint8_t> sei = nal(3, 0x06, 19, 300);
+    s0.insert(s0.end(), sei.begin(), sei.end());
+    std::vector<uint8_t> s1 = nal(4, 0x41, 119, 400);
+    std::vector<uint8_t> s2 = nal(3, 0x41, 79, 600);
+    const std::vector<uint8_t>* samples[] = {&s0, &s1, &s2};
+    const uint64_t pts[] = {0, 33333, 66667};
+    const uint64_t end_us = 100000;
+    const size_t audio_sizes[] = {341, 342, 340, 341};
+    const size_t audio_skips[] = {1000, 1400, 1800, 2200};
+    const uint64_t audio_pts[] = {500, 21833, 43166, 64500};
+    std::vector<std::vector<uint8_t>> frames;
+    for (int i = 0; i < 4; ++i) frames.push_back(det_nozero(audio_sizes[i], audio_skips[i]));
+    pv_segment_audio audio{};
+    audio.codec = PV_AUDIO_CODEC_AAC;
+    audio.channels = 2;
+    audio.sample_rate = 48000;
+    audio.avg_bitrate = 128000;
+    audio.max_bitrate = 128000;
+    audio.config = asc;
+    audio.config_len = sizeof(asc);
+    pv_segment_writer* w = nullptr;
+    int rc = pv_segment_writer_open_av(1920, 1080, 90, sps, sizeof(sps), pps, sizeof(pps), &audio, 1 << 20, &w);
+    if (rc != PV_OK) {
+        std::fprintf(stderr, "segment open: %s\n", pv_error_name(rc));
+        return 2;
+    }
+    // The order of arrival: video 0, audio 0 and 1, video 1, audio 2, video 2, audio 3.
+    const int order[][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}, {1, 2}, {0, 2}, {1, 3}};
+    for (const int* step : order) {
+        if (step[0] == 0) {
+            rc = pv_segment_writer_add(w, samples[step[1]]->data(), samples[step[1]]->size(), pts[step[1]], step[1] == 0);
+        } else {
+            rc = pv_segment_writer_add_audio(w, frames[step[1]].data(), frames[step[1]].size(), audio_pts[step[1]]);
+        }
+        if (rc != PV_OK) {
+            std::fprintf(stderr, "segment add: %s\n", pv_error_name(rc));
+            return 2;
+        }
+    }
+    rc = pv_segment_writer_finish(w, end_us);
+    if (rc != PV_OK) {
+        std::fprintf(stderr, "segment finish: %s\n", pv_error_name(rc));
+        return 2;
+    }
+    const uint8_t* data = nullptr;
+    size_t len = 0;
+    pv_segment_writer_data(w, &data, &len);
+    const std::string path = dir + "/segment_av_one_fragment.bin";
+    pv_file_delete(path.c_str());
+    if (pv_file_write_atomic(path.c_str(), data, len) != PV_OK) {
+        std::fprintf(stderr, "cannot write %s\n", path.c_str());
+        return 2;
+    }
+    std::vector<uint8_t> all;
+    for (const std::vector<uint8_t>& f : frames) all.insert(all.end(), f.begin(), f.end());
+    const std::string apath = dir + "/segment_av_audio.bin";
+    pv_file_delete(apath.c_str());
+    if (pv_file_write_atomic(apath.c_str(), all.data(), all.size()) != PV_OK) {
+        std::fprintf(stderr, "cannot write %s\n", apath.c_str());
+        return 2;
+    }
+    // Box offsets: end of moov, end of sidx, moof, the audio traf, mdat, the
+    // audio payload, end of file.
+    size_t pos = 0;
+    size_t moov_end = 0, sidx_end = 0, moof = 0, audio_traf = 0, mdat = 0, audio_payload = 0;
+    auto rd32 = [&](size_t at) {
+        return (static_cast<uint32_t>(data[at]) << 24) | (static_cast<uint32_t>(data[at + 1]) << 16) |
+               (static_cast<uint32_t>(data[at + 2]) << 8) | data[at + 3];
+    };
+    while (pos + 8 <= len) {
+        uint32_t size = rd32(pos);
+        std::string type(reinterpret_cast<const char*>(data + pos + 4), 4);
+        if (type == "moov") moov_end = pos + size;
+        if (type == "sidx") sidx_end = pos + size;
+        if (type == "moof") {
+            moof = pos;
+            // mfhd, the video traf, the audio traf.
+            size_t child = pos + 8;
+            child += rd32(child);
+            child += rd32(child);
+            audio_traf = child;
+            // The audio trun data offset: tfhd, tfdt, then the trun header.
+            size_t trun = audio_traf + 8 + 16 + 20;
+            audio_payload = moof + rd32(trun + 16);
+        }
+        if (type == "mdat") mdat = pos;
+        pos += size;
+    }
+    uint8_t digest[PV_HASH_BYTES];
+    crypto_generichash(digest, sizeof(digest), data, len, nullptr, 0);
+    std::string text = "# Two-track segment writer vector (Phase 3F). Synthetic values, TEST ONLY.\n"
+                       "# One fragment: the three video samples of segment.txt (1920x1080, rotation 90,\n"
+                       "# timescale 1000000) and four AAC frames (48000 Hz, 2 channels, 128000 bit/s,\n"
+                       "# timescale 48000, 1024 samples per frame). Bodies are deterministic bytes with\n"
+                       "# zeros replaced by 0x7f (test_segment_writer.cpp builds the same).\n"
+                       "# audio <n> <bytes> <pts_us>: the frames, back to back in segment_av_audio.bin.\n"
+                       "# offsets <moov_end> <sidx_end> <moof> <audio_traf> <mdat> <audio_payload> <file_len>\n";
+    text += "sps " + hex(sps, sizeof(sps)) + "\n";
+    text += "pps " + hex(pps, sizeof(pps)) + "\n";
+    text += "audio_config " + hex(asc, sizeof(asc)) + "\n";
+    text += "audio_format 2 48000 128000\n";
+    for (int i = 0; i < 3; ++i) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "sample %d %zu %llu %d\n", i, samples[i]->size(),
+                      static_cast<unsigned long long>(pts[i]), i == 0 ? 1 : 0);
+        text += buf;
+    }
+    for (int i = 0; i < 4; ++i) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "audio %d %zu %llu\n", i, frames[i].size(),
+                      static_cast<unsigned long long>(audio_pts[i]));
+        text += buf;
+    }
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "end_us %llu\nfirst_tick 24\noffsets %zu %zu %zu %zu %zu %zu %zu\nblake2b %s\n",
+                  static_cast<unsigned long long>(end_us), moov_end, sidx_end, moof, audio_traf, mdat, audio_payload, len,
+                  hex(digest, sizeof(digest)).c_str());
+    text += buf;
+    pv_segment_writer_close(w);
+    const std::string tpath = dir + "/segment_av.txt";
+    pv_file_delete(tpath.c_str());
+    if (pv_file_write_atomic(tpath.c_str(), reinterpret_cast<const uint8_t*>(text.data()), text.size()) != PV_OK) {
+        return 2;
+    }
+    std::printf("wrote segment_av_one_fragment.bin (%zu bytes), segment_av_audio.bin, segment_av.txt\n", len);
+    return 0;
+}
+
 std::string first_word(const std::string& line) {
     std::istringstream in(line);
     std::string w;
@@ -513,9 +653,10 @@ int main(int argc, char** argv) {
     const bool envelope_only = argc == 3 && std::strcmp(argv[2], "--envelope3") == 0;
     const bool index_only = argc == 3 && std::strcmp(argv[2], "--video-index") == 0;
     const bool segment_only = argc == 3 && std::strcmp(argv[2], "--segment") == 0;
+    const bool segment_av_only = argc == 3 && std::strcmp(argv[2], "--segment-av") == 0;
     if (argc < 2 || argc > 3 ||
-        (argc == 3 && std::strcmp(argv[2], "--items") != 0 && !envelope_only && !index_only && !segment_only)) {
-        std::fprintf(stderr, "usage: make_vectors <output_dir> [--items|--envelope3|--video-index|--segment]\n");
+        (argc == 3 && std::strcmp(argv[2], "--items") != 0 && !envelope_only && !index_only && !segment_only && !segment_av_only)) {
+        std::fprintf(stderr, "usage: make_vectors <output_dir> [--items|--envelope3|--video-index|--segment|--segment-av]\n");
         return 1;
     }
     if (pv_init() != PV_OK) {
@@ -530,6 +671,9 @@ int main(int argc, char** argv) {
     }
     if (segment_only) {
         return write_segment_vector(dir);
+    }
+    if (segment_av_only) {
+        return write_segment_av_vector(dir);
     }
     const bool items_only = argc == 3;
     const uint32_t c = PV_MIN_CHUNK_SIZE;

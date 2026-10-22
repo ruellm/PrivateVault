@@ -3,6 +3,7 @@ package com.privatevault.app
 import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
+import android.media.AudioManager
 import android.media.MediaFormat
 import android.os.Bundle
 import android.os.Debug
@@ -18,6 +19,8 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -40,7 +43,10 @@ import java.util.concurrent.ConcurrentHashMap
 // memory when the player opens it and wiped when it closes it; the picture
 // goes to a secure SurfaceView and the index rotation is applied by the
 // codec. Tap to play or pause, a seek bar through the index seek rule,
-// elapsed and total time, Delete behind an in-activity confirmation. A lock
+// elapsed and total time, Delete behind an in-activity confirmation. The
+// audio track plays with audio focus (pause on loss, pause when headphones
+// are unplugged), the volume keys set the media volume, Mute silences this
+// viewer; clips without a track play silent (docs/PHASE3F_DESIGN.md 4.6). A lock
 // or a stop releases the player, which closes every open segment. The
 // surface keeps the screen on while playing; no wake lock. Not exported;
 // the extras are the index object ID and an optional script for the T3 runs.
@@ -81,6 +87,9 @@ class VideoActivity : Activity(), LockController.Listener {
         var pssPeakKiB = 0
         var nativePeakKiB = 0L
         var javaPeakKiB = 0L
+        // The audio track the player found, or null for a silent clip.
+        @Volatile var audioFormat: String? = null
+        var audioUnderruns = 0
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -94,6 +103,7 @@ class VideoActivity : Activity(), LockController.Listener {
     private lateinit var status: TextView
     private lateinit var confirm: LinearLayout
     private lateinit var deleteButton: Button
+    private lateinit var muteButton: Button
     private var id: ByteArray = ByteArray(0)
     private var hex = ""
     private var scriptSeeks = 0
@@ -132,6 +142,11 @@ class VideoActivity : Activity(), LockController.Listener {
     var surfaceSecure = false
         private set
     @Volatile var deleteResult: VideoItems.DeleteResult? = null
+        private set
+    // The clip has no audio track (from the index), and the viewer mute.
+    var silent = false
+        private set
+    var muted = false
         private set
 
     val isPlaying: Boolean get() = player?.isPlaying == true
@@ -174,6 +189,7 @@ class VideoActivity : Activity(), LockController.Listener {
             if (p.startsWith("seeks=")) scriptSeeks = p.substringAfter('=').toIntOrNull() ?: 0
         }
         lock.addListener(this)
+        volumeControlStream = AudioManager.STREAM_MUSIC
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.BLACK)
@@ -227,6 +243,11 @@ class VideoActivity : Activity(), LockController.Listener {
             setOnClickListener { confirm.visibility = View.VISIBLE }
         }
         buttons.addView(deleteButton)
+        muteButton = Button(this).apply {
+            text = "Mute"
+            setOnClickListener { setMuted(!muted) }
+        }
+        buttons.addView(muteButton)
         root.addView(buttons)
         confirm = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -290,6 +311,9 @@ class VideoActivity : Activity(), LockController.Listener {
                 return@post
             }
             index = idx
+            silent = idx.header.audioCodec == NativeBridge.AUDIO_CODEC_NONE
+            if (silent) say("silent clip")
+            Log.i(TAG, "video: audio track=${if (silent) "none" else "aac channels=${idx.header.audioChannels} rate=${idx.header.audioSampleRate}"}")
             total.text = VideoItems.durationLabel(idx.header.totalDurationUs)
             bar.max = (idx.header.totalDurationUs / 1000).toInt()
             Log.i(TAG, "video: index $hex segments=${idx.segments.size} keys=${idx.keysTotal} duration_ms=${idx.header.totalDurationUs / 1000} ${idx.header.width}x${idx.header.height} rotation=${idx.header.rotation}")
@@ -320,7 +344,12 @@ class VideoActivity : Activity(), LockController.Listener {
         val p = ExoPlayer.Builder(this)
             .setMediaSourceFactory(ProgressiveMediaSource.Factory(sources, extractors).setLoadErrorHandlingPolicy(noRetry))
             .setLoadControl(loadControl)
+            // Audio focus is requested on play and a loss pauses; unplugged
+            // headphones pause (D-050).
+            .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true)
+            .setHandleAudioBecomingNoisy(true)
             .build()
+        if (muted) p.volume = 0f
         p.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
                 when (state) {
@@ -381,6 +410,20 @@ class VideoActivity : Activity(), LockController.Listener {
         p.addAnalyticsListener(object : AnalyticsListener {
             override fun onDroppedVideoFrames(eventTime: AnalyticsListener.EventTime, droppedFrames: Int, elapsedMs: Long) {
                 report.droppedFrames += droppedFrames
+            }
+
+            override fun onAudioInputFormatChanged(eventTime: AnalyticsListener.EventTime, format: Format, decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?) {
+                report.audioFormat = "${format.sampleMimeType} channels=${format.channelCount} rate=${format.sampleRate}"
+                Log.i(TAG, "video: audio format ${report.audioFormat}")
+            }
+
+            override fun onAudioDecoderInitialized(eventTime: AnalyticsListener.EventTime, decoderName: String, initializedTimestampMs: Long, initializationDurationMs: Long) {
+                Log.i(TAG, "video: audio decoder $decoderName")
+            }
+
+            override fun onAudioUnderrun(eventTime: AnalyticsListener.EventTime, bufferSize: Int, bufferSizeMs: Long, elapsedSinceLastFeedMs: Long) {
+                report.audioUnderruns++
+                Log.i(TAG, "video: audio underrun buffer_ms=$bufferSizeMs since_feed_ms=$elapsedSinceLastFeedMs")
             }
         })
         p.setVideoFrameMetadataListener(object : VideoFrameMetadataListener {
@@ -458,6 +501,14 @@ class VideoActivity : Activity(), LockController.Listener {
         }
         if (p.isPlaying) lock.touch()
         main.postDelayed(ticker, TICK_MS)
+    }
+
+    // Mute for this viewer instance: the player volume, not the device.
+    fun setMuted(on: Boolean) {
+        muted = on
+        muteButton.text = if (on) "Unmute" else "Mute"
+        player?.volume = if (on) 0f else 1f
+        Log.i(TAG, "video: ${if (on) "muted" else "unmuted"}")
     }
 
     fun togglePlay() {
@@ -561,7 +612,7 @@ class VideoActivity : Activity(), LockController.Listener {
 
     private fun logSummary() {
         val gaps = synchronized(report.boundaryGapsMs) { ArrayList(report.boundaryGapsMs) }
-        Log.i(TAG, "video: summary first_frame_ms=${report.firstFrameMs} transitions=${report.transitions} boundary_gaps_ms=${gaps.joinToString(",")} frames=${report.framesRendered} dropped=${report.droppedFrames} errors=${report.errors.size}")
+        Log.i(TAG, "video: summary first_frame_ms=${report.firstFrameMs} transitions=${report.transitions} boundary_gaps_ms=${gaps.joinToString(",")} frames=${report.framesRendered} dropped=${report.droppedFrames} errors=${report.errors.size} audio=${report.audioFormat ?: "none"} audio_underruns=${report.audioUnderruns}")
         Log.i(TAG, "video: memory peak_live_buffers=${live.peakCount} peak_live_bytes=${live.peakBytes} opens=${live.opens} closes=${live.closes} pss_peak=${report.pssPeakKiB}KiB native_heap_peak=${report.nativePeakKiB}KiB java_heap_peak=${report.javaPeakKiB}KiB")
     }
 

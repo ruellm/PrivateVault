@@ -56,6 +56,7 @@ const char* pv_error_name(int code) {
         case PV_ERR_NOT_INDEX: return "PV_ERR_NOT_INDEX";
         case PV_ERR_SEGMENT_FULL: return "PV_ERR_SEGMENT_FULL";
         case PV_ERR_SEGMENT_STATE: return "PV_ERR_SEGMENT_STATE";
+        case PV_ERR_AUDIO_QUEUE_FULL: return "PV_ERR_AUDIO_QUEUE_FULL";
         default: return "PV_ERR_UNKNOWN";
     }
 }

@@ -46,6 +46,12 @@ object NativeBridge {
     const val SEGMENT_TIMESCALE = 1_000_000
     const val SEGMENT_MAX_FRAGMENTS = 64
     const val SEGMENT_MAX_SAMPLES_PER_FRAGMENT = 1024
+    // Audio (Phase 3F).
+    const val ERR_AUDIO_QUEUE_FULL = 32
+    const val SEGMENT_MAX_AUDIO_SAMPLES_PER_FRAGMENT = 512
+    const val SEGMENT_AUDIO_STAGE_BYTES = 512L shl 10
+    const val SEGMENT_AUDIO_FRAME = 1024
+    const val AUDIO_QUEUE_CAP = 2L shl 20
 
     const val VMK_BYTES = 32
     const val OBJECT_ID_BYTES = 16
@@ -221,6 +227,28 @@ object NativeBridge {
     ): Int
     // Wipes and frees the segment buffer.
     external fun nativeSegmentClose(handle: Long)
+
+    // Phase 3F audio (docs/PHASE3F_DESIGN.md Section 4.7). A null config
+    // opens a video-only writer; stageBytes 0 takes the default stage.
+    external fun nativeSegmentOpenAv(
+        width: Int, height: Int, rotation: Int, sps: ByteArray, pps: ByteArray,
+        channels: Int, sampleRate: Int, bitrate: Int, config: ByteArray?, stageBytes: Long, cap: Long, handleOut: LongArray
+    ): Int
+    // Appends one AAC frame (a direct ByteBuffer) with its time from the segment start.
+    external fun nativeSegmentAddAudio(handle: Long, buffer: ByteBuffer, offset: Int, length: Int, ptsUs: Long): Int
+    // out = [audio samples, first tick].
+    external fun nativeSegmentAudioStats(handle: Long, out: LongArray): Int
+    // The audio queue: encoded frames in guarded memory until the video has
+    // reached their time. Handles are opaque 64-bit values.
+    external fun nativeAudioQueueOpen(cap: Long, handleOut: LongArray): Int
+    external fun nativeAudioQueuePush(handle: Long, buffer: ByteBuffer, offset: Int, length: Int, ptsUs: Long): Int
+    // out[0] = frames dropped.
+    external fun nativeAudioQueueDiscardBefore(handle: Long, ptsUs: Long, out: LongArray): Int
+    // out = [moved, clamped]; a failed move returns its status with the counts so far.
+    external fun nativeAudioQueueMove(handle: Long, writer: Long, baseUs: Long, untilUs: Long, out: LongArray): Int
+    // out = [bytes, frames, head pts].
+    external fun nativeAudioQueueStats(handle: Long, out: LongArray): Int
+    external fun nativeAudioQueueClose(handle: Long)
 
     // Phase 2. fields = [media_type, rotation_degrees, width, height, created_unix_ms].
     // Direct buffer: the native side reads the bytes in place.

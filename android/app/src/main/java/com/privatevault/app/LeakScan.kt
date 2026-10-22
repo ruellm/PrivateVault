@@ -162,14 +162,20 @@ object LeakScan {
                     ),
                     "${MediaStore.MediaColumns.OWNER_PACKAGE_NAME} = ?", arrayOf(context.packageName), null
                 ).use { c ->
-                    out[name] = c?.count ?: 0
-                    // Name each row so a directory entry can be told from a media file.
+                    // Directory rows (no MIME type) are named but not counted:
+                    // the test runner makes Android/media/<package>/additional_test_output
+                    // for every instrumented run, and the media scanner lists
+                    // it whenever it gets there first. A media file has a type.
+                    var files = 0
                     while (c != null && c.moveToNext()) {
+                        val mime = c.getString(3)
+                        if (mime != null) files++
                         notes.add(
-                            "MediaStore $name row: ${c.getString(1)} in ${c.getString(2)} " +
-                                "mime=${c.getString(3)} size=${c.getLong(4)}"
+                            "MediaStore $name ${if (mime == null) "directory" else "row"}: ${c.getString(1)} in ${c.getString(2)} " +
+                                "mime=$mime size=${c.getLong(4)}"
                         )
                     }
+                    out[name] = files
                 }
             } catch (e: Exception) {
                 notes.add("MediaStore $name query failed: ${e.javaClass.simpleName}")

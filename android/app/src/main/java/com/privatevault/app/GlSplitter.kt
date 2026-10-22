@@ -62,6 +62,10 @@ class GlSplitter(private val say: (String) -> Unit) : SurfaceTexture.OnFrameAvai
     val cameraFrames = AtomicInteger(0)
     @Volatile var firstFrameNs = 0L
     @Volatile var lastFrameNs = 0L
+    // The first frame: the camera timestamp and the boot clock reading at
+    // its callback, so a caller can tell which clock the camera stamps on.
+    @Volatile var firstTimestampNs = 0L
+    @Volatile var firstFrameBootNs = 0L
     @Volatile var released = false
 
     private val vertices: java.nio.FloatBuffer = ByteBuffer.allocateDirect(8 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
@@ -156,17 +160,21 @@ class GlSplitter(private val say: (String) -> Unit) : SurfaceTexture.OnFrameAvai
     override fun onFrameAvailable(st: SurfaceTexture) {
         if (released) return
         val now = System.nanoTime()
-        if (cameraFrames.getAndIncrement() == 0) firstFrameNs = now
+        if (cameraFrames.getAndIncrement() == 0) {
+            firstFrameNs = now
+            firstFrameBootNs = android.os.SystemClock.elapsedRealtimeNanos()
+        }
         lastFrameNs = now
         try {
             EGL14.eglMakeCurrent(display, pbuffer, pbuffer, context)
             st.updateTexImage()
             st.getTransformMatrix(texMatrix)
+            val ts = st.timestamp
             if (cameraFrames.get() == 1) {
+                firstTimestampNs = ts
                 // The camera transform of this device, once per stream.
                 say("gl_split: texture matrix ${texMatrix.joinToString(",") { "%.2f".format(it) }}")
             }
-            val ts = st.timestamp
             for (o in outputs) {
                 val matrix = o.adjust(texMatrix.copyOf()) ?: continue
                 if (!EGL14.eglMakeCurrent(display, o.eglSurface, o.eglSurface, context)) {

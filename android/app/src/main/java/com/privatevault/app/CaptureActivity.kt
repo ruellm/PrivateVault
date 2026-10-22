@@ -3,6 +3,8 @@ package com.privatevault.app
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
 import android.graphics.Color
 import android.os.Bundle
 import android.os.Handler
@@ -38,7 +40,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 // CameraX image buffer into an encrypted vault object through CaptureSession.
 // Video mode (docs/PHASE3E_DESIGN.md Section 4.1) records through the
 // process-scoped VideoRecorder with the preview kept live; the shutter
-// becomes Record and Stop, an elapsed label sits over the preview. FLAG_SECURE
+// becomes Record and Stop, an elapsed label sits over the preview. Audio is
+// on by default with a Mute toggle that resets whenever video mode opens;
+// the microphone is asked for once per process on entering video mode, and
+// a denial gives recordings without audio and a Microphone button for the
+// retry (docs/PHASE3F_DESIGN.md Section 4.1). FLAG_SECURE
 // keeps the preview out of screenshots, screen recordings, and the recents
 // thumbnail. Scripted actions (debug use) arrive in the "actions" extra and
 // run once the camera is bound.
@@ -48,8 +54,20 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
         const val TAG = "PrivateVault"
         const val EXTRA_ACTIONS = "actions"
         private const val PERMISSION_REQUEST = 1
+        private const val AUDIO_PERMISSION_REQUEST = 2
         private const val TICK_MS = 200L
+        // The microphone is asked for once per process (D-048).
+        @Volatile private var audioAskedThisProcess = false
     }
+
+    @Volatile private var audioPermissionLatch: CountDownLatch? = null
+    private lateinit var muteButton: Button
+    private lateinit var micButton: Button
+    // Audio off for the next recording; reset whenever video mode opens.
+    var muted = false
+        private set
+    var audioDenied = false
+        private set
 
     private val main = Handler(Looper.getMainLooper())
     private lateinit var previewView: PreviewView
@@ -144,6 +162,16 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
             visibility = View.GONE
             setOnClickListener { requestCamera() }
         }
+        muteButton = Button(this).apply {
+            text = "Mute"
+            visibility = View.GONE
+            setOnClickListener { setMuted(!muted) }
+        }
+        micButton = Button(this).apply {
+            text = "Microphone"
+            visibility = View.GONE
+            setOnClickListener { askAudioAgain() }
+        }
         flip = Button(this).apply {
             text = "Flip"
             setOnClickListener {
@@ -154,9 +182,11 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
         }
         buttons.addView(shutter)
         buttons.addView(modeButton)
+        buttons.addView(muteButton)
         buttons.addView(flip)
         buttons.addView(lockButton)
         buttons.addView(grant)
+        buttons.addView(micButton)
         root.addView(buttons)
         status = TextView(this).apply { setTextIsSelectable(true) }
         scroll = ScrollView(this).apply { addView(status) }
@@ -225,9 +255,29 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
         requestPermissions(arrayOf(Manifest.permission.CAMERA), PERMISSION_REQUEST)
     }
 
+    // Asks for the microphone and waits for the answer; used by the Stage 3F
+    // audio probes on the script thread.
+    private fun ensureAudioPermission(): Boolean {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) return true
+        val latch = CountDownLatch(1)
+        audioPermissionLatch = latch
+        main.post { requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), AUDIO_PERMISSION_REQUEST) }
+        latch.await(120, TimeUnit.SECONDS)
+        val granted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        say("audio: permission ${if (granted) "granted" else "denied"}")
+        return granted
+    }
+
     @Deprecated("Deprecated in Java")
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == AUDIO_PERMISSION_REQUEST) {
+            audioDenied = checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
+            say("audio: permission ${if (audioDenied) "denied" else "granted"}")
+            updateAudioLabels()
+            audioPermissionLatch?.countDown()
+            return
+        }
         if (requestCode != PERMISSION_REQUEST) return
         if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
             grant.visibility = View.GONE
@@ -353,13 +403,63 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
         else -> "ERROR_UNKNOWN($code)"
     }
 
-    // Switches between photo and video mode; refused while recording.
+    // Switches between photo and video mode; refused while recording. Video
+    // mode starts with audio on and asks for the microphone once per process.
     fun setVideoMode(video: Boolean) {
         if (recorder.isRecording || video == videoMode) return
         videoMode = video
         modeButton.text = if (video) "Photo" else "Video"
-        shutter.text = if (video) "Record" else "Capture"
+        if (video) {
+            muted = false
+            muteButton.text = "Mute"
+            askAudioOnce()
+        }
+        updateAudioLabels()
         provider?.let { bindUseCases(it) }
+    }
+
+    fun setMuted(on: Boolean) {
+        if (recorder.isRecording) return
+        muted = on
+        muteButton.text = if (on) "Unmute" else "Mute"
+        say("audio: ${if (on) "muted" else "on"} for the next recording")
+    }
+
+    private fun hasAudioPermission(): Boolean =
+        checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+    private fun askAudioOnce() {
+        if (hasAudioPermission()) {
+            audioDenied = false
+            return
+        }
+        audioDenied = true
+        if (audioAskedThisProcess) return
+        audioAskedThisProcess = true
+        requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), AUDIO_PERMISSION_REQUEST)
+    }
+
+    // The Microphone button: asks again while the system still shows the
+    // dialog, else opens the app page of the system settings.
+    private fun askAudioAgain() {
+        if (hasAudioPermission()) {
+            audioDenied = false
+            updateAudioLabels()
+            return
+        }
+        if (shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), AUDIO_PERMISSION_REQUEST)
+        } else {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null)))
+        }
+    }
+
+    private fun recordLabel(): String = if (!videoMode) "Capture" else if (audioDenied) "Record (no audio)" else "Record"
+
+    private fun updateAudioLabels() {
+        if (!recorder.isRecording) shutter.text = recordLabel()
+        muteButton.visibility = if (videoMode) View.VISIBLE else View.GONE
+        micButton.visibility = if (videoMode && audioDenied) View.VISIBLE else View.GONE
     }
 
     private fun toggleRecording() {
@@ -372,7 +472,8 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
         val p = provider ?: return "CAMERA_NOT_READY"
         if (vaults.vault == null) return "VAULT_CLOSED"
         if (!videoMode) return "PHOTO_MODE"
-        val refused = recorder.start(p, this, lensFacing, previewView.surfaceProvider) { result ->
+        audioDenied = !hasAudioPermission()
+        val refused = recorder.start(p, this, lensFacing, previewView.surfaceProvider, !muted) { result ->
             main.post { onRecordingDone(result) }
         }
         if (refused != null) {
@@ -386,10 +487,12 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
     }
 
     private fun showRecording(on: Boolean) {
-        shutter.text = if (on) "Stop" else if (videoMode) "Record" else "Capture"
+        shutter.text = if (on) "Stop" else recordLabel()
         shutter.isEnabled = on || cameraReady
         flip.isEnabled = !on
         modeButton.isEnabled = !on
+        muteButton.isEnabled = !on
+        micButton.visibility = if (videoMode && audioDenied) View.VISIBLE else View.GONE
         elapsedLabel.visibility = if (on) View.VISIBLE else View.GONE
         main.removeCallbacks(ticker)
         if (on) main.post(ticker)
@@ -397,7 +500,12 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
 
     private fun tick() {
         if (!recorder.isRecording) return
-        elapsedLabel.text = "● " + VideoItems.durationLabel(recorder.elapsedMs * 1000)
+        val audio = when (recorder.currentAudio) {
+            "on" -> "mic"
+            "muted" -> "muted"
+            else -> "no audio"
+        }
+        elapsedLabel.text = "● " + VideoItems.durationLabel(recorder.elapsedMs * 1000) + " " + audio
         main.postDelayed(ticker, TICK_MS)
     }
 
@@ -486,14 +594,26 @@ class CaptureActivity : ComponentActivity(), LockController.Listener {
                 // Stage 3E: a recording of the given length from the feature
                 // path, and a forced stop reason for the next recording.
                 name.startsWith("record=") -> recordAndWait(name.substringAfter('=').toLong())
+                // Stage 3F: mute=<0|1> for the next recording (video mode opened first).
+                name.startsWith("mute=") -> {
+                    val on = name.substringAfter('=') == "1"
+                    val latch = CountDownLatch(1)
+                    main.post {
+                        setVideoMode(true)
+                        setMuted(on)
+                        latch.countDown()
+                    }
+                    latch.await(5, TimeUnit.SECONDS)
+                }
                 name.startsWith("record_hook=") -> {
                     val hook = name.substringAfter('=')
                     if (hook == "SKIP_INDEX") recorder.testHooks.skipIndex = true else recorder.testHooks.stopAt = hook
                     say("record hook $hook set")
                 }
-                name == "video_probe" || name.startsWith("video_probe=") -> {
+                name == "video_probe" || name.startsWith("video_probe=") || name.startsWith("audio_") -> {
                     val runner = VideoProbes.get()
                     if (runner == null) say("$name: not available in this build")
+                    else if (name.startsWith("audio_") && !ensureAudioPermission()) say("$name: skipped, no microphone permission")
                     else runner.run(name, this, imageCapture, camera, provider, lensFacing, vaults, ::say)
                 }
                 else -> say("unknown action $name")

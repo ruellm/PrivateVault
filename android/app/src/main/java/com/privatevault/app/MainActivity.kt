@@ -36,7 +36,8 @@ class MainActivity : Activity(), LockController.Listener {
 
     // Actions that need the capture screen; the rest of the list goes with them.
     private val captureActions = setOf(
-        "capture_photo", "video_probe", "record", "record_hook", "flip", "memory", "test_hook_slow", "test_hook_clear", "wait"
+        "capture_photo", "video_probe", "record", "record_hook", "flip", "memory", "test_hook_slow", "test_hook_clear", "wait",
+        "audio_caps", "mute"
     )
 
     private fun routeIfLocked(): Boolean {
@@ -160,6 +161,11 @@ class MainActivity : Activity(), LockController.Listener {
                 name.startsWith("video_open=") -> { { openVideo(name.substringAfter('=')) } }
                 name.startsWith("delete_video=") -> { { deleteVideo(name.substringAfter('=')) } }
                 name == "sweep" -> { { say("sweep: ${VideoItems.sweep(requireVault()).line()}") } }
+                // Phase 3F: the readback gate and the A/V sync probe, debug variant only.
+                name.startsWith("readback=") || name.startsWith("av_sync=") -> { {
+                    val action = VideoProbes.vaultAction
+                    if (action == null) say("$name: not available in this build") else action(name, requireVault(), ::say)
+                } }
                 else -> { { say("unknown action $name") } }
             }
             run(name, action)

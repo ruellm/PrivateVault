@@ -208,3 +208,15 @@ feature: debug 21 024 156, benchmark 15 816 467, release (unsigned) 15 808 275 b
 media3 classes defined: debug 2637, benchmark and release 2577; `androidx.camera.video` 0.
 Merged release and benchmark manifests unchanged (`CAMERA` only, six activities,
 `LockActivity` the only export).
+
+## Phase 3F (2026-10-22)
+
+No new dependency. Audio uses the platform `AudioRecord`, `AudioManager` (the recording
+callback, the music volume stream), and `MediaCodec` (the AAC encoder, software on both
+test devices), the core writer and audio queue, and ExoPlayer's own audio renderer,
+focus handling, and becoming-noisy handling (media3 1.11.1 unchanged). APK sizes with
+audio: debug 21 253 028, benchmark 15 882 043, release (unsigned) 15 873 851 bytes
+(benchmark 65 576 bytes over 3E); media3 classes defined: debug 2637, benchmark and
+release 2577; `androidx.camera.video` 0. Merged release and benchmark manifests:
+`CAMERA` and `RECORD_AUDIO` (plus the AGP-declared `DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`),
+six activities, `LockActivity` the only export.

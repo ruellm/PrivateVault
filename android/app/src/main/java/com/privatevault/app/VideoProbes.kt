@@ -22,6 +22,10 @@ object VideoProbes {
     // screen on the index object named by the argument of video_play.
     @Volatile var playback: ((Context, String) -> Unit)? = null
 
+    // Stage 3F readback and A/V sync probes (debug source set): run on the
+    // vault screen over an index object, no camera needed.
+    @Volatile var vaultAction: ((String, Vault, (String) -> Unit) -> Unit)? = null
+
     fun install(r: VideoProbeRunner) {
         runner = r
     }

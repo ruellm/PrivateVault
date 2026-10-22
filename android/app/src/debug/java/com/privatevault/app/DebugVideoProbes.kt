@@ -59,6 +59,13 @@ class DebugVideoProbes : VideoProbeRunner {
                     .putExtra(VideoProbeActivity.EXTRA_AUTO, true)
             )
         }
+        VideoProbes.vaultAction = { name, vault, say ->
+            when {
+                name.startsWith("readback=") -> Readback.run(name.substringAfter('='), vault, say)
+                name.startsWith("av_sync=") -> AvSync.run(name.substringAfter('='), vault, say)
+                else -> say("$name: unknown probe")
+            }
+        }
     }
 
     override fun run(
@@ -75,6 +82,8 @@ class DebugVideoProbes : VideoProbeRunner {
                 val backstop = parts.getOrNull(2)?.toIntOrNull() ?: V3Probe.IFRAME_BACKSTOP_S
                 V3Probe(activity, activity, p, lensFacing, vaults, say, clipMs, fragmentMs, backstop).run()
             }
+            // Stage 3F: the device audio capabilities (docs/PHASE3F_DESIGN.md 2.2).
+            name == "audio_caps" -> AudioProbes.caps(activity, say)
             else -> say("$name: not available in this build")
         }
         activity.rebindAndWait()

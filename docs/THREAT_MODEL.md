@@ -355,3 +355,40 @@ listed, not claimed. Design: `docs/PHASE3E_DESIGN.md`.
 - The encrypt queue bound of two finished segments means a slow encrypt stops a
   recording; measured headroom on the phone is 280 to 356 ms per 3.4 MB segment in the
   debug build.
+
+## 12. Phase 3F additions: audio (approved 2026-10-21 at the Milestone B checkpoint)
+
+What Stage 3F claims, and only this: **a recording captures the microphone only while
+audio is on and the permission is granted, encoded audio reaches the segment through
+guarded memory the app wipes, the Java heap holds no audio, and every interruption
+leaves the audio recorded so far inside the encrypted segments.** What the audio HAL,
+the codec, and the player hold is listed, not claimed. Design: `docs/PHASE3F_DESIGN.md`.
+
+### 12.1 New assets
+
+| Asset | Where it lives | Lifetime |
+|---|---|---|
+| PCM from the microphone | the `AudioRecord` buffer of one second (audio HAL, audioserver) and one direct read buffer of the app (4 KiB) | per chunk; the read buffer is zeroed when the audio thread ends |
+| AAC encoder input and output buffers | platform codec | per frame |
+| Encoded audio waiting for the video | `pv_audio_queue` in guarded native memory | the video encoder lag (about 0.5 s on the phone), bounded at 2 MiB; wiped |
+| The audio of the open fragment | the writer's guarded stage | one fragment; wiped |
+| The audio track inside a segment | the guarded segment buffer, then the encrypted object | as 3E |
+| Decoded audio during playback | the media3 sample queue, the decoder buffers, the `AudioTrack` | playback |
+
+### 12.2 Threats and the Stage 3F position
+
+| # | Threat | Position |
+|---|---|---|
+| T50 | The microphone records when the user does not expect it | audio is captured only during a recording with audio on; the mute toggle opens no `AudioRecord`; the system indicator shows the capture; a denied permission is respected without repeated prompts |
+| T51 | Plaintext audio in the Java heap | none by construction: PCM goes from one direct buffer to the codec, encoded frames from the codec buffer to the guarded queue |
+| T52 | A lock during a recording leaves audio unencrypted | the drain finishes the last segment with its audio inside the 4 s bound; past it the queue and the open segment are wiped |
+| T53 | Another app takes the microphone | the recording stops with the audio so far; nothing is recorded as silence without the user knowing (API 29 and later) |
+| T54 | Audio metadata in plaintext | the codec config and the per-fragment audio times are inside the encrypted object, as the video's |
+| T55 | Playback audio reaches other apps | the player hands decoded audio to the platform `AudioTrack`, as any media app; focus loss pauses |
+
+### 12.3 Residual risks
+
+- The audio HAL, the codec, and the `AudioTrack` are outside the app on every device.
+- On API 28 a silenced microphone delivers zeros and the recording continues.
+- The queue holds up to the video encoder lag of audio in guarded memory; a stalled
+  encoder stops the recording at 2 MiB.

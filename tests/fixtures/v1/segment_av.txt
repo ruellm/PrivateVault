@@ -1,0 +1,22 @@
+# Two-track segment writer vector (Phase 3F). Synthetic values, TEST ONLY.
+# One fragment: the three video samples of segment.txt (1920x1080, rotation 90,
+# timescale 1000000) and four AAC frames (48000 Hz, 2 channels, 128000 bit/s,
+# timescale 48000, 1024 samples per frame). Bodies are deterministic bytes with
+# zeros replaced by 0x7f (test_segment_writer.cpp builds the same).
+# audio <n> <bytes> <pts_us>: the frames, back to back in segment_av_audio.bin.
+# offsets <moov_end> <sidx_end> <moof> <audio_traf> <mdat> <audio_payload> <file_len>
+sps 67640028acd940780227e5c044000003000400000300f03c60c658
+pps 68ebe3cb22c0
+audio_config 1190
+audio_format 2 48000 128000
+sample 0 327 0 1
+sample 1 124 33333 0
+sample 2 83 66667 0
+audio 0 341 500
+audio 1 342 21833
+audio 2 340 43166
+audio 3 341 64500
+end_us 100000
+first_tick 24
+offsets 1111 1163 1163 1287 1383 1927 3291
+blake2b 7595200b345a436cee787c106e879d03cbfb128153c9a1eacbc9eeb5bc8bd5b7

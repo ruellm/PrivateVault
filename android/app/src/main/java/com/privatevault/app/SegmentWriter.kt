@@ -8,10 +8,23 @@ import java.nio.ByteBuffer
 // buffer is wiped on close, which happens exactly once on every path.
 class SegmentWriter private constructor(private var handle: Long) : AutoCloseable {
 
+    // The AAC track of a segment: channels, sample rate, bitrate, and the
+    // AudioSpecificConfig the encoder reports (csd-0). stageBytes 0 takes
+    // the default stage.
+    class AudioFormat(val channels: Int, val sampleRate: Int, val bitrate: Int, val config: ByteArray, val stageBytes: Long = 0)
+
+    class AudioStats(val samples: Int, val firstTick: Long)
+
     companion object {
-        fun open(width: Int, height: Int, rotation: Int, sps: ByteBuffer, pps: ByteBuffer, cap: Long): SegmentWriter {
+        fun open(width: Int, height: Int, rotation: Int, sps: ByteBuffer, pps: ByteBuffer, cap: Long): SegmentWriter =
+            openAv(width, height, rotation, sps, pps, null, cap)
+
+        fun openAv(width: Int, height: Int, rotation: Int, sps: ByteBuffer, pps: ByteBuffer, audio: AudioFormat?, cap: Long): SegmentWriter {
             val out = LongArray(1)
-            val rc = NativeBridge.nativeSegmentOpen(width, height, rotation, bytes(sps), bytes(pps), cap, out)
+            val rc = NativeBridge.nativeSegmentOpenAv(
+                width, height, rotation, bytes(sps), bytes(pps),
+                audio?.channels ?: 0, audio?.sampleRate ?: 0, audio?.bitrate ?: 0, audio?.config, audio?.stageBytes ?: 0, cap, out
+            )
             if (rc != NativeBridge.OK || out[0] == 0L) throw Vault.CoreException(rc, "segment open")
             return SegmentWriter(out[0])
         }
@@ -40,6 +53,22 @@ class SegmentWriter private constructor(private var handle: Long) : AutoCloseabl
         if (!buffer.isDirect) return NativeBridge.ERR_INVALID_ARGUMENT
         return NativeBridge.nativeSegmentAdd(require(), buffer, buffer.position(), buffer.remaining(), ptsUs, key)
     }
+
+    // Appends one AAC frame between position and limit of a direct buffer
+    // with its time from the segment start. Returns the core status.
+    fun addAudio(buffer: ByteBuffer, ptsUs: Long): Int {
+        if (!buffer.isDirect) return NativeBridge.ERR_INVALID_ARGUMENT
+        return NativeBridge.nativeSegmentAddAudio(require(), buffer, buffer.position(), buffer.remaining(), ptsUs)
+    }
+
+    fun audioStats(): AudioStats {
+        val out = LongArray(2)
+        val rc = NativeBridge.nativeSegmentAudioStats(require(), out)
+        if (rc != NativeBridge.OK) throw Vault.CoreException(rc, "segment audio stats")
+        return AudioStats(out[0].toInt(), out[1])
+    }
+
+    internal fun rawHandle(): Long = require()
 
     fun finish(endUs: Long): Int = NativeBridge.nativeSegmentFinish(require(), endUs)
 

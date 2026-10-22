@@ -11,6 +11,7 @@ add_library(vault_core STATIC
     src/viewer.cpp
     src/video_index.cpp
     src/segment.cpp
+    src/audio_queue.cpp
 )
 
 target_include_directories(vault_core

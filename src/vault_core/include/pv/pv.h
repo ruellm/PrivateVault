@@ -59,6 +59,8 @@ extern "C" {
 // or finish after finish, finish with no sample).
 #define PV_ERR_SEGMENT_FULL 30
 #define PV_ERR_SEGMENT_STATE 31
+// Audio queue code (Phase 3F). See docs/PHASE3F_DESIGN.md Section 4.7.
+#define PV_ERR_AUDIO_QUEUE_FULL 32
 
 // Sizes fixed by the format. Key sizes equal the libsodium constants; the
 // core checks that at compile time.
@@ -511,6 +513,69 @@ int pv_segment_writer_stats(const pv_segment_writer* w, size_t* bytes_out, uint3
                             uint32_t* fragments_out);
 // Wipes and frees the buffer and the writer. NULL is ignored.
 void pv_segment_writer_close(pv_segment_writer* w);
+
+// Audio track (Phase 3F, docs/PHASE3F_DESIGN.md Section 4.3). A segment may
+// carry one AAC track beside the video: an mp4a sample entry with esds in
+// the moov, a trex per track, and per fragment a second traf (tfhd, tfdt,
+// trun with duration and size per sample). The audio track counts in
+// samples: the first audio frame of the segment gets its microsecond time
+// rounded to samples, every later frame sits exactly 1024 samples after the
+// one before, every duration is 1024. The audio samples of the open fragment
+// wait in a guarded stage and are written behind the fragment's video
+// samples when it closes.
+#define PV_SEGMENT_MAX_AUDIO_SAMPLES_PER_FRAGMENT 512u
+#define PV_SEGMENT_AUDIO_STAGE_BYTES (512u * 1024u)
+#define PV_SEGMENT_AUDIO_FRAME 1024u
+
+typedef struct pv_segment_audio {
+    uint16_t codec;            // PV_AUDIO_CODEC_AAC
+    uint16_t channels;         // 1 or 2
+    uint32_t sample_rate;      // 8000 to 96000
+    uint32_t avg_bitrate;      // bits per second for the esds, 0 when unknown
+    uint32_t max_bitrate;
+    const uint8_t* config;     // AudioSpecificConfig (the encoder csd-0), 2 to 64 bytes
+    size_t config_len;
+    size_t stage_bytes;        // the audio stage size, 0 for PV_SEGMENT_AUDIO_STAGE_BYTES
+} pv_segment_audio;
+
+// As pv_segment_writer_open, plus an audio track; audio may be NULL.
+int pv_segment_writer_open_av(uint32_t width, uint32_t height, uint16_t rotation_degrees,
+                              const uint8_t* sps, size_t sps_len, const uint8_t* pps, size_t pps_len,
+                              const pv_segment_audio* audio, size_t cap, pv_segment_writer** out);
+// Appends one AAC frame (raw, no ADTS) with its time from the segment start
+// to the open fragment. Times must not decrease. PV_ERR_SEGMENT_STATE before
+// the first video sample, after finish, or without an audio track;
+// PV_ERR_SEGMENT_FULL when the fragment holds
+// PV_SEGMENT_MAX_AUDIO_SAMPLES_PER_FRAGMENT frames, the stage is full, or
+// the buffer has no room; the writer stays usable.
+int pv_segment_writer_add_audio(pv_segment_writer* w, const uint8_t* sample, size_t len, uint64_t pts_us);
+// Audio frames added so far and the sample tick of the first one.
+int pv_segment_writer_audio_stats(const pv_segment_writer* w, uint32_t* samples_out, uint64_t* first_tick_out);
+
+// Audio queue (Phase 3F, docs/PHASE3F_DESIGN.md Section 4.2): encoded audio
+// frames in guarded memory, waiting until the video has reached their time.
+// Frames go in with a time on the recorder clock and come out into a segment
+// writer timed from that segment's start. The buffer is wiped on close.
+#define PV_AUDIO_QUEUE_CAP (2u * 1024u * 1024u)
+
+typedef struct pv_audio_queue pv_audio_queue;
+
+int pv_audio_queue_open(size_t cap, pv_audio_queue** out);
+// Appends one frame. Times must not decrease. PV_ERR_AUDIO_QUEUE_FULL when
+// the frame does not fit.
+int pv_audio_queue_push(pv_audio_queue* q, const uint8_t* sample, size_t len, uint64_t pts_us);
+// Removes every queued frame with a time below pts_us; dropped_out gets the count.
+int pv_audio_queue_discard_before(pv_audio_queue* q, uint64_t pts_us, uint32_t* dropped_out);
+// Moves every queued frame with a time below until_us into the writer,
+// timed from base_us; a frame below base_us is written at time 0 and counted
+// in clamped_out. Stops at the first writer error and returns it; the frame
+// that failed stays queued. moved_out gets the frames written.
+int pv_audio_queue_move(pv_audio_queue* q, pv_segment_writer* w, uint64_t base_us, uint64_t until_us,
+                        uint32_t* moved_out, uint32_t* clamped_out);
+// Bytes and frames held; head_pts_out gets the time of the oldest frame, 0 when empty.
+int pv_audio_queue_stats(const pv_audio_queue* q, size_t* bytes_out, uint32_t* frames_out, uint64_t* head_pts_out);
+// Wipes and frees. NULL is ignored.
+void pv_audio_queue_close(pv_audio_queue* q);
 
 #ifdef __cplusplus
 }

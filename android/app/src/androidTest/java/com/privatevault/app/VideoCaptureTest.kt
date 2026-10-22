@@ -99,6 +99,7 @@ class VideoCaptureTest {
         if (recorder.isRecording) recorder.stopAndWait("teardown", 10_000)
         if (lock.state == LockState.UNLOCKED) lock.lock("test")
         lock.erase()
+        app.captureSession.resume()
         lock.testHooks.kdfOverride = null
     }
 
@@ -176,7 +177,8 @@ class VideoCaptureTest {
         val latch = CountDownLatch(1)
         var result: VideoRecorder.Result? = null
         try {
-            val refused = recorder.start(provider, owner, CameraSelector.LENS_FACING_BACK, vf) { r ->
+            // The 3E checks cover the single-track shape; AudioCaptureTest covers the audio.
+            val refused = recorder.start(provider, owner, CameraSelector.LENS_FACING_BACK, vf, false) { r ->
                 result = r
                 latch.countDown()
             }

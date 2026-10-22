@@ -691,3 +691,120 @@ setting with T2 and the phone captures green; otherwise the threat model records
 copy.
 
 Alternatives: as D-027.
+
+## D-044 Audio format AAC-LC 48 kHz stereo 128 kbit/s from the CAMCORDER source through the platform encoder (2026-10-21, approved at the Phase 3F checkpoint)
+
+Measured in Milestone A: both devices offer only the software AAC encoders
+(`c2.android.aac.encoder`, `OMX.google.aac.encoder`), 8 to 48 kHz, up to 6 channels, 8 to
+510 kbit/s; every `AudioRecord` configuration of `CAMCORDER` and `MIC` at 48 and 44.1 kHz
+mono and stereo initializes and delivers frames; the encoder keeps input times on its
+output.
+
+Choice: AAC-LC at 48 kHz, stereo, 128 kbit/s, source `CAMCORDER`, `MediaCodec` by type;
+mono when the device offers no stereo input. The `AudioSpecificConfig` the encoder
+reports goes into the container; the index records codec 1, channels, and rate.
+
+Alternatives: 44.1 kHz (no reason on these devices); the `MIC` source (no processing
+chosen by the platform for camcorder use); a hardware encoder (none exists here).
+
+## D-045 The audio track in the core writer: mp4a with esds, a second traf per moof, the audio counted in samples, per-fragment interleaving (2026-10-21, approved at the Phase 3F checkpoint as amended: the audio timescale is the sample rate, every AAC frame exactly 1024 ticks, the video stays in microseconds)
+
+Measured: a Kotlin sketch of the two-track container in the 3E shape (`tfdt`, `sidx`,
+`trun` 0x701 for the video, 0x301 for the audio, the audio samples after the video
+samples in each `mdat`) is parsed by the framework `MediaExtractor` and media3
+`FragmentedMp4Extractor` with equal sample counts per track and played by ExoPlayer with
+no underrun on both devices, with the audio track in microseconds and in samples alike.
+The framework extractor ignores `tfdt` and times every track from 0.
+
+Choice: the core writer takes an optional audio track at open (`pv_segment_audio`),
+writes the `mp4a` sample entry with `esds`, a `trex` per track, and per fragment an audio
+`traf` with `tfdt` and a `trun` of durations and sizes; the audio track counts in
+samples (timescale 48 000): the first frame of a segment gets its microsecond time
+rounded to samples, every later frame sits exactly 1024 samples after the one before,
+every duration is 1024, so a fragment's audio `tfdt` is the first tick plus 1024 times
+the frames before it, with no drift (T1 checks one hour); the video stays in
+microseconds; the audio of a fragment is the audio whose time falls in its video span,
+staged in guarded memory until the fragment closes. The single-track shape is unchanged.
+
+Alternatives: both tracks in microseconds (measured, works; per-frame rounding of 21 333
+or 21 334 us, which the developer ruled out at the checkpoint); interleaving inside the
+`mdat` by time (needs several runs per track, no reader gain at one-second fragments).
+
+## D-046 One clock for both tracks: the camera clock found at the first frame, audio timed from AudioRecord.getTimestamp (2026-10-21, approved at the Phase 3F checkpoint)
+
+Measured: the Xiaomi declares `SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME` and stamps camera
+frames on the boot clock, 353 662 s off the monotonic clock on the trial day; the
+emulator declares `UNKNOWN` on its back camera and stamps on the monotonic clock. The
+camera timestamp of the first frame lies 33 to 103 ms before its callback on the right
+clock. `getTimestamp` succeeds on the first read on both devices; later timestamps stay
+within 0.2 ms of a frame count from the first one over 20 s on the Xiaomi. The clap
+clip plays with the audio 30 to 90 ms behind the video by the probe, on time by the
+developer's ear and eye.
+
+Choice: the recorder compares the first camera timestamp with `System.nanoTime` and
+`SystemClock.elapsedRealtimeNanos` and takes the nearer clock as the camera clock; audio
+chunks are timed on the monotonic clock from the first `getTimestamp` anchor by frame
+count and moved by the boot-minus-monotonic difference when the camera uses the boot
+clock. No empirical correction constant; T3 measures the offset again.
+
+Alternatives: trusting the declared source (right on the phone, says nothing on the
+emulator); timing audio by the read return time (10 to 110 ms of pipeline latency
+ignored); a fixed correction (not supported by the measurement).
+
+## D-047 Encoded audio waits in a guarded queue in the core until the video has reached its time (2026-10-21, approved at the Phase 3F checkpoint as amended: audio arriving after the wait goes into the next segment and is never dropped; only the final segment drains to the last sample)
+
+Measured: the video encoder output lags the camera by about 0.5 s on the Xiaomi and over
+a second on the emulator, while encoded audio arrives about 20 ms after capture; audio
+appended on arrival landed in the wrong segment at every cut on the emulator (53 frames
+of segment 1 written into segment 0 and dropped). With the audio queued until a video
+sample at or past its time was written, every segment of every trial clip held its audio
+contiguously from boundary to boundary; the queue peaked at 25 to 34 frames on the
+phone.
+
+Choice: `pv_audio_queue` in guarded memory takes every AAC output buffer from the
+encoder in place; the video drain moves the queued frames below the last video time
+into the open writer after every video sample; at a cut the old segment takes the
+frames below the key frame time and waits for audio past it (or 500 ms) before it is
+finished; a frame that arrives after that goes into the next segment, written at its
+start, never dropped; at stop the whole queue is moved into the last segment to its
+last frame. Audio from before the first video frame is discarded (the clip begins with
+that frame). Cap 2 MiB; past it the recording stops through the 3E stop path and keeps
+the clip.
+
+Alternatives: appending on arrival (wrong at every cut); holding the audio in Java (a
+copy of every frame in the heap, against the brief); delaying the video (the video
+samples still have to precede the audio in the fragment).
+
+## D-048 Microphone permission asked once on entering video mode; a mute toggle held by the recorder (2026-10-21, approved at the Phase 3F checkpoint)
+
+Choice: `RECORD_AUDIO` is requested the first time the capture screen enters video mode
+in a process; a denial gives recordings without an audio track, "no audio" on the record
+button and the elapsed label, and a Microphone button that asks again or opens the app
+settings page when the system shows no dialog; the app repeats no request by itself. The
+Mute toggle lives in the process-scoped recorder: muted recordings open no `AudioRecord`
+and write no audio track.
+
+Alternatives: asking at app start (audio is not needed for photos); asking at every
+recording (a loop).
+
+## D-049 Interruptions end the recording through the 3E stop path after the audio encoder is drained (2026-10-21, approved at the Phase 3F checkpoint)
+
+Choice: the microphone taken (the app's recording reported silenced by the recording
+callback), a read error, a codec exception on the audio thread, and the queue cap each
+call `VideoRecorder.stop` with their name; the stop path drains the video, stops the
+`AudioRecord`, drains the AAC encoder (bounded by 1 s), moves the queue into the last
+segment, and finishes it; the lock's 4 s bound covers the drain and wipes the queue past
+it.
+
+Alternatives: pausing on an interruption (two clips, out of scope); recording on with
+silence (the user gets a silent clip without knowing).
+
+## D-050 Playback with audio focus, a mute button, the media volume keys, and a pause when headphones are unplugged (2026-10-21, approved at the Phase 3F checkpoint)
+
+Choice: ExoPlayer with media audio attributes and focus handling (pause on loss, duck
+on a transient loss), `setHandleAudioBecomingNoisy`, the volume keys on the music
+stream, a Mute button that sets the player volume to 0 for the viewer instance; clips
+without an audio track play silent and the status line says so from the index.
+
+Alternatives: an own focus listener (ExoPlayer has one); a persistent mute setting (a
+viewer-side convenience, not a vault setting).

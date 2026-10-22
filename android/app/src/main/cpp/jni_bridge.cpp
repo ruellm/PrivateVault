@@ -1460,6 +1460,166 @@ Java_com_privatevault_app_NativeBridge_nativeSegmentClose(JNIEnv*, jclass, jlong
     }
 }
 
+// Phase 3F: the audio track and the audio queue (docs/PHASE3F_DESIGN.md
+// Section 4.7). A null config opens a video-only writer.
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeSegmentOpenAv(JNIEnv* env, jclass, jint width, jint height,
+                                                           jint rotation, jbyteArray sps, jbyteArray pps,
+                                                           jint channels, jint sample_rate, jint bitrate,
+                                                           jbyteArray config, jlong stage_bytes, jlong cap,
+                                                           jlongArray handle_out) {
+    std::vector<uint8_t> s;
+    std::vector<uint8_t> p;
+    std::vector<uint8_t> c;
+    if (width <= 0 || height <= 0 || rotation < 0 || rotation > 0xffff || cap <= 0 || stage_bytes < 0 || !handle_out ||
+        env->GetArrayLength(handle_out) < 1 || !copy_bytes(env, sps, 0, s) || !copy_bytes(env, pps, 0, p)) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    pv_segment_audio audio{};
+    const pv_segment_audio* audio_ptr = nullptr;
+    if (config) {
+        if (channels <= 0 || sample_rate <= 0 || bitrate < 0 || !copy_bytes(env, config, 0, c)) {
+            return PV_ERR_INVALID_ARGUMENT;
+        }
+        audio.codec = PV_AUDIO_CODEC_AAC;
+        audio.channels = static_cast<uint16_t>(channels);
+        audio.sample_rate = static_cast<uint32_t>(sample_rate);
+        audio.avg_bitrate = static_cast<uint32_t>(bitrate);
+        audio.max_bitrate = static_cast<uint32_t>(bitrate);
+        audio.config = c.data();
+        audio.config_len = c.size();
+        audio.stage_bytes = static_cast<size_t>(stage_bytes);
+        audio_ptr = &audio;
+    }
+    pv_segment_writer* w = nullptr;
+    int rc = pv_segment_writer_open_av(static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+                                       static_cast<uint16_t>(rotation), s.data(), s.size(), p.data(), p.size(),
+                                       audio_ptr, static_cast<size_t>(cap), &w);
+    jlong h = rc == PV_OK ? static_cast<jlong>(reinterpret_cast<intptr_t>(w)) : 0;
+    env->SetLongArrayRegion(handle_out, 0, 1, &h);
+    return rc;
+}
+
+// Appends one AAC frame from a direct buffer (the encoder output buffer).
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeSegmentAddAudio(JNIEnv* env, jclass, jlong handle, jobject buffer,
+                                                             jint offset, jint length, jlong pts_us) {
+    if (!handle || !buffer || offset < 0 || length <= 0 || pts_us < 0) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    void* base = env->GetDirectBufferAddress(buffer);
+    jlong cap = env->GetDirectBufferCapacity(buffer);
+    if (!base || cap < 0 || static_cast<jlong>(offset) + length > cap) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    return pv_segment_writer_add_audio(handle_to_writer(handle), static_cast<const uint8_t*>(base) + offset,
+                                       static_cast<size_t>(length), static_cast<uint64_t>(pts_us));
+}
+
+// out = [audio samples, first tick].
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeSegmentAudioStats(JNIEnv* env, jclass, jlong handle, jlongArray out) {
+    if (!handle || !out || env->GetArrayLength(out) < 2) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    uint32_t samples = 0;
+    uint64_t tick = 0;
+    int rc = pv_segment_writer_audio_stats(handle_to_writer(handle), &samples, &tick);
+    if (rc == PV_OK) {
+        jlong v[2] = {samples, static_cast<jlong>(tick)};
+        env->SetLongArrayRegion(out, 0, 2, v);
+    }
+    return rc;
+}
+
+pv_audio_queue* handle_to_queue(jlong h) {
+    return reinterpret_cast<pv_audio_queue*>(static_cast<intptr_t>(h));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeAudioQueueOpen(JNIEnv* env, jclass, jlong cap, jlongArray handle_out) {
+    if (cap <= 0 || !handle_out || env->GetArrayLength(handle_out) < 1) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    pv_audio_queue* q = nullptr;
+    int rc = pv_audio_queue_open(static_cast<size_t>(cap), &q);
+    jlong h = rc == PV_OK ? static_cast<jlong>(reinterpret_cast<intptr_t>(q)) : 0;
+    env->SetLongArrayRegion(handle_out, 0, 1, &h);
+    return rc;
+}
+
+// Pushes one AAC frame from a direct buffer with its time.
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeAudioQueuePush(JNIEnv* env, jclass, jlong handle, jobject buffer,
+                                                            jint offset, jint length, jlong pts_us) {
+    if (!handle || !buffer || offset < 0 || length <= 0 || pts_us < 0) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    void* base = env->GetDirectBufferAddress(buffer);
+    jlong cap = env->GetDirectBufferCapacity(buffer);
+    if (!base || cap < 0 || static_cast<jlong>(offset) + length > cap) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    return pv_audio_queue_push(handle_to_queue(handle), static_cast<const uint8_t*>(base) + offset,
+                               static_cast<size_t>(length), static_cast<uint64_t>(pts_us));
+}
+
+// out[0] = frames dropped.
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeAudioQueueDiscardBefore(JNIEnv* env, jclass, jlong handle, jlong pts_us,
+                                                                     jlongArray out) {
+    if (!handle || pts_us < 0 || !out || env->GetArrayLength(out) < 1) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    uint32_t dropped = 0;
+    int rc = pv_audio_queue_discard_before(handle_to_queue(handle), static_cast<uint64_t>(pts_us), &dropped);
+    jlong v = dropped;
+    env->SetLongArrayRegion(out, 0, 1, &v);
+    return rc;
+}
+
+// Moves the frames below until_us into the writer timed from base_us;
+// out = [moved, clamped]. The status of a failed move comes back with the
+// counts so far.
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeAudioQueueMove(JNIEnv* env, jclass, jlong handle, jlong writer,
+                                                            jlong base_us, jlong until_us, jlongArray out) {
+    if (!handle || !writer || base_us < 0 || until_us < 0 || !out || env->GetArrayLength(out) < 2) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    uint32_t moved = 0;
+    uint32_t clamped = 0;
+    int rc = pv_audio_queue_move(handle_to_queue(handle), handle_to_writer(writer), static_cast<uint64_t>(base_us),
+                                 static_cast<uint64_t>(until_us), &moved, &clamped);
+    jlong v[2] = {moved, clamped};
+    env->SetLongArrayRegion(out, 0, 2, v);
+    return rc;
+}
+
+// out = [bytes, frames, head pts].
+JNIEXPORT jint JNICALL
+Java_com_privatevault_app_NativeBridge_nativeAudioQueueStats(JNIEnv* env, jclass, jlong handle, jlongArray out) {
+    if (!handle || !out || env->GetArrayLength(out) < 3) {
+        return PV_ERR_INVALID_ARGUMENT;
+    }
+    size_t bytes = 0;
+    uint32_t frames = 0;
+    uint64_t head = 0;
+    int rc = pv_audio_queue_stats(handle_to_queue(handle), &bytes, &frames, &head);
+    if (rc == PV_OK) {
+        jlong v[3] = {static_cast<jlong>(bytes), frames, static_cast<jlong>(head)};
+        env->SetLongArrayRegion(out, 0, 3, v);
+    }
+    return rc;
+}
+
+JNIEXPORT void JNICALL
+Java_com_privatevault_app_NativeBridge_nativeAudioQueueClose(JNIEnv*, jclass, jlong handle) {
+    if (handle) {
+        pv_audio_queue_close(handle_to_queue(handle));
+    }
+}
+
 #ifdef PV_DEBUG_HOOKS
 // Debug variant only: a copy of the finished segment for the box checks of
 // the tests. Returns null before finish; the caller wipes the array.

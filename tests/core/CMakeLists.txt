@@ -36,6 +36,7 @@ pv_add_test(test_envelope3)
 pv_add_test(test_viewer_buffer)
 pv_add_test(test_video_index)
 pv_add_test(test_segment_writer)
+pv_add_test(test_audio_queue)
 set_tests_properties(test_large test_bounded_memory PROPERTIES LABELS "large" TIMEOUT 1800)
 
 if(PV_TEST_HOOKS)
